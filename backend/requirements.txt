@@ -1,0 +1,24 @@
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+pydantic==2.*
+pydantic-settings==2.*
+
+# Database
+sqlalchemy[asyncio]==2.*
+psycopg[binary]
+psycopg2-binary==2.*
+alembic==1.*
+
+# Redis
+redis==5.*
+
+# HTTP
+httpx==0.28.*
+
+# Utilities
+python-dotenv==1.*
+
+# Testing
+pytest==8.*
+pytest-asyncio==0.*
+httpx==0.28.*
