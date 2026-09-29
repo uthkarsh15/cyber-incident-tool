@@ -9,6 +9,20 @@
 
 ---
 
+## Stage A — Run the stack (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| A.1 All 5 containers up, no crash loops | ✅ VERIFIED | `docker ps --format table` → 5 services Up, none Restarting | db (healthy), redis, backend, agent_orchestrator, dashboard |
+| A.2 Alembic initial migration applied | ✅ VERIFIED | `docker exec db psql -c "\dt"` → 7 tables + alembic_version | `Running upgrade -> 90218464f447, initial tables` in backend logs |
+| A.3 FastAPI /docs loads | ✅ VERIFIED | `curl -s -o NUL -w "%{http_code}" :8000/docs` → 200 | /health, /, /openapi.json, /api/v1/incidents all 200 |
+| A.4 FastAPI /api/v1/incidents returns valid JSON | ✅ VERIFIED | `curl :8000/api/v1/incidents` → `{"total":0,...,"incidents":[]}` | Empty is OK pre-seed |
+| A.5 Streamlit dashboard loads | ✅ VERIFIED | `curl :8501/_stcore/health` → 200 `ok`; `/` → 200 HTML | Streamlit poll-based watcher active (WSL) |
+| A.6 Orchestrator starts, no import crashes | ✅ VERIFIED | `docker logs agent_orchestrator` → `Starting orchestrator queue consumer...` | Graceful `Spacy not installed` WARN only (intentional, regex fallback) |
+| A.7 ⚠️ No scraper/scheduler service | ⚠️ GAP (reported, not fixed here) | `docker compose config` services list | Only db/redis/backend/agent_orchestrator/dashboard defined. scraper/Dockerfile exists but not used. SCRAPER_INTERVAL_MINUTES orphaned. Orchestrator BLPO on empty queue forever. |
+
+---
+
 ## Stage 0 — Freeze & Inspect (VERIFIED 2026-09-29)
 
 | Item | Status | Proof command | Notes |
