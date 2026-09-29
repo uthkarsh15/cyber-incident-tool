@@ -1,90 +1,139 @@
-# HANDOFF.md — Reading This First
+# HANDOFF.md (v3) — Indian Cyber Incident Intelligence Platform
 
-> You're picking up the **Indian Cyber Incident Intelligence Platform** (`cyber-incident-tool`) from a teammate who ran out of AI tokens partway through. This file tells you what's real, what's not, and what to do next.
-
----
-
-## 1. What this project is
-
-An automated pipeline that scrapes CERT-In and The Hacker News for cybersecurity incidents, filters/classifies them for India-relevance via a custom agent pipeline, stores them in Postgres, and serves them through a FastAPI backend + Streamlit dashboard.
-
-Full spec lives in `Synopsis_CyberIncidentTool.md` (SIH Problem ID 1677, NTRO).
+> Repo-root file. Replaces earlier handoffs. This version assumes **no coding agent has access to your files**: the human runs every command and pastes files and outputs into a normal chat. That changes how the work must be done (see section 4).
 
 ---
 
-## 2. Read the docs in this order
+## 1. Where things stand
 
-The repo already has a full internal doc system — **don't skip it, and don't let an AI assistant skip it either**:
+**Project:** scrapes CERT-In and The Hacker News, filters incidents for India-relevance, classifies and deduplicates them through custom agents, stores them in PostgreSQL, serves them via FastAPI and a Streamlit dashboard. Built for SIH Problem ID 1677 (NTRO). Spec: `Synopsis_CyberIncidentTool.md`.
 
-1. **`PROJECT_RULES.md`** — the master rulebook. Tech stack (exact versions, what's explicitly banned — no MongoDB, no Kafka, no LangChain, no paid APIs), folder structure, coding standards, env vars, git conventions, ethical scraping rules. Read this before writing a single line.
-2. **`ARCHITECTURE.md`** — system design / component diagram.
-3. **`DATA_MODELS.md`** — DB schema, Pydantic models, API contracts.
-4. **`AGENT_DESIGN.md`** — spec for the 5-agent pipeline (relevance → classification → correlation → insight → orchestrator).
-5. **`IMPLEMENTATION_PLAN.md`** — the original phase-by-phase build order.
-6. **`PROGRESS.md`** — the living tracker. **Read this last and skeptically** (see below).
+**History:**
+1. Session 1 (AI) wrote all 9 phases and marked everything DONE on 2026-09-24 without running anything.
+2. Session 2 (AI) started an audit and ran out of quota.
+3. Gemini Code Assist in VS Code did not work.
+4. Updated code was then obtained elsewhere and **pasted by hand into the intended files.** Nobody has yet verified that the pasted files landed correctly or that the project runs.
 
----
-
-## 3. The important caveat: "DONE" ≠ "verified working"
-
-`PROGRESS.md` shows all 9 phases as ✅ DONE. Don't take that at face value. The **Known Issues & Blockers** table in that same file, and notes buried in individual task rows, tell the real story:
-
-| What the tracker says | What it actually means |
-|---|---|
-| Phase 1–9 all ✅ DONE | Code exists for every planned file. It has **not** been run end-to-end. |
-| "Alembic Setup — ✅ DONE" | Note says *"migrations fail to apply (DB not running locally)"* — never actually tested against a real Postgres instance. |
-| "ML Models — ✅ DONE" (Phases 8.1–8.4) | This is **scaffolding only**. No labeled training data exists yet, so the DistilBERT classifier and NER model have never actually been trained. |
-| "CERT-In website may change structure" (Medium, Open) | Spider selectors were written against the site's HTML at one point in time — untested for whether they still match. |
-| "No labeled training data yet" (Medium, Open) | Blocks real ML work until someone curates a dataset. |
-
-**Translation: treat this as a project where every file has a first draft, but nothing has been proven to actually run.** Your first job isn't writing new features — it's verification.
+**Treat as unknown:** what the pasted code contains, whether any file is missing or misplaced, and whether anything runs. `PROGRESS.md` is a claim, not evidence. Only a command that ran successfully counts as proof.
 
 ---
 
-## 4. Environment setup
+## 2. Step 0 — Freeze and inspect the pasted state (do this before anything else)
 
-### Option A — Docker (recommended, matches `README.md`)
+Run in the project root (PowerShell or terminal):
+
 ```bash
-git clone https://github.com/uthkarsh15/cyber-incident-tool
-cd cyber-incident-tool
-docker-compose up --build
+git status --short
+git diff --stat
+git ls-files
 ```
-- Dashboard: http://localhost:8501
-- API docs: http://localhost:8000/docs
 
-### Option B — Local (no Docker)
-```bash
-python -m venv .venv
-.venv\Scripts\activate        # Windows PowerShell
-pip install -r backend/requirements.txt
+1. **Commit the pasted state as a checkpoint** so nothing is lost and you can undo later mistakes:
+   ```bash
+   git add -A
+   git commit -m "checkpoint: manually pasted updated code, unverified"
+   git push origin main
+   ```
+   Before `git add -A`, confirm `.env` is listed in `.gitignore` and does not appear in `git status` output. Never push real secrets.
+2. **Syntax check every Python file** (catches bad paste, broken indentation, truncated files):
+   ```bash
+   python -m compileall backend scraper dashboard ml tests -q
+   ```
+   Any output means a file has a syntax error. Note the file names.
+3. **Compare against the expected structure.** The layout the project rules call for is: `backend/app/{api,agents,models,schemas,services,utils}`, `backend/alembic`, `scraper/{spiders,pipelines}`, `dashboard/{app.py,pages}`, `ml/`, `tests/`, plus `docker-compose.yml`, `.env.example`. Compare with the `git ls-files` output and list anything missing, misplaced (for example a file pasted into the wrong folder), or duplicated.
+4. **Check `__init__.py` files** exist in every package folder under `backend/app/` and `scraper/`. Missing ones cause import errors that look mysterious.
+
+Write down the results. They are the first entry in `STATUS.md`.
+
+---
+
+## 3. Definition of done
+
+- [ ] `docker-compose up --build` starts every service with no crash loops
+- [ ] Alembic migrations apply cleanly on an empty database; seed script runs
+- [ ] `/docs` loads and `GET /api/v1/incidents` returns valid JSON
+- [ ] At least one spider runs against the live site and yields real items
+- [ ] Items flow Redis → orchestrator → PostgreSQL → API
+- [ ] Non-India items are filtered out; relevant ones get attack type, severity, sector
+- [ ] Duplicate reports are grouped, not stored twice
+- [ ] Dashboard shows real stored incidents with working filters
+- [ ] Scraping runs on a schedule without manual commands
+- [ ] `pytest` passes, coverage reported honestly
+- [ ] README and `PROGRESS.md` match what actually runs
+
+Optional stretch: train the DistilBERT classifier and NER model. The rule-based classifiers are the working MVP.
+
+---
+
+## 4. The manual workflow (how work gets done now)
+
+Because the AI cannot see your files or run commands, every fix follows this loop:
+
 ```
-Then install PostgreSQL + Redis locally, copy `.env.example` → `.env` and fill in values, and follow the run commands in `PROJECT_RULES.md` §10 (migrations → FastAPI → orchestrator → Streamlit, each in its own terminal).
+YOU run a command  →  copy the FULL output  →  paste into chat together with the
+relevant file(s)  →  AI returns fixed code  →  YOU paste it into the file  →
+run the command again  →  repeat until it passes  →  git commit
+```
 
-Full dependency list (backend, scraper, ML, dashboard, spaCy model) is at the bottom of `PROGRESS.md`.
+Rules that make this reliable:
 
----
+- **AI must return complete file contents** for any file under about 150 lines, in one code block labeled with the exact path. For longer files it must give exact find-and-replace blocks ("find this text, replace with this") with the path. No "rest of the code unchanged" placeholders, and no partial snippets you would have to merge by hand.
+- **One file per code block, path on top.** Paste into that path only.
+- **Always paste real output**, complete, not a description of it. Include the command that produced it.
+- **Always paste the file being fixed**, as it exists on disk now, not from memory of an earlier chat.
+- **After every pasted change**, re-run `python -m compileall` on the folder before running the app. It catches paste damage in seconds.
+- **Commit after each working step** (`git commit -am "stage B: migrations apply"`). A commit is your undo button.
+- **If a chat gets long and the AI starts contradicting itself**, commit, start a fresh chat, and use the Resume prompt in `FIRST_PROMPT.md`.
 
-## 5. What to actually do first (in order)
-
-1. **Get it running.** Either Docker or local. This alone will surface most of what's broken — expect migration errors, missing packages, and spider selector mismatches.
-2. **Run the test suite**: `cd backend && pytest -v --tb=short`. `PROJECT_RULES.md` requires 70% coverage per phase — check if that's real or aspirational.
-3. **Run one spider manually** against CERT-In / The Hacker News and confirm items actually make it into Redis → Postgres via the orchestrator. This is the piece most likely to be silently broken (site structure drift).
-4. **Once the pipeline runs end-to-end on real data**, update `PROGRESS.md` with what you found — that's the project's own convention (see §9 of `PROJECT_RULES.md`, "Documentation Update Protocol"). Every completed task should get a status, date, and notes; every changed schema/agent/architecture piece should update the matching doc.
-5. **Only then** move on to real remaining work: curating a labeled dataset and actually training the ML models (Phase 8 is the one phase that's genuinely not just "unverified" but not-yet-startable without data).
-
----
-
-## 6. Ground rules to keep following
-
-From `PROJECT_RULES.md` — these are binding, not suggestions:
-- Exactly one tool per job — don't swap in MongoDB, Kafka, React, LangChain, etc.
-- No paid APIs, ever.
-- Respect `robots.txt`, minimum 2-second delay between scraper requests, no CAPTCHA bypassing, no dark-web crawling, no PII storage.
-- Alembic only for schema changes — never touch the DB directly.
-- Update `PROGRESS.md`, and any other doc affected, after every task.
+Tool options: any chat assistant works for this loop (the Gemini web app, Claude, ChatGPT). Optionally try **Gemini CLI** in a terminal. It can read files and run commands itself, which removes the copy-paste loop. Check its current install steps and free-tier limits before relying on it. Your Gemini Plus subscription applies to the Gemini app, so confirm what it does and does not cover for the CLI.
 
 ---
 
-## 7. Handing this to an AI assistant
+## 5. Suspected problem areas (hypotheses to verify, not facts)
 
-See the prompt below — give it to Claude (or whichever assistant you're using) as your opening message in a fresh conversation, with the repo cloned and accessible (or key files pasted in if it can't browse your local files).
+1. **Nothing may trigger the scrapers.** Docker Compose is documented as db, redis, backend, orchestrator, dashboard, with no scraper or scheduler. The orchestrator would wait on an empty queue. `SCRAPER_INTERVAL_MINUTES` may be unused.
+2. **Migrations never applied.** Check that Alembic has actual version files, and whether the app also creates tables via `init_db()`. Use one approach, consistently (Alembic, per the project rules).
+3. **Driver mismatch.** README mentions `psycopg`; dependencies list `asyncpg` and `psycopg2-binary`. The DB URL scheme must match an installed async driver.
+4. **Stale spider selectors.** Written without testing against the live sites. Consider The Hacker News RSS feed if HTML parsing is fragile.
+5. **Relevance filter too strict.** Global news may be almost entirely rejected by India-keyword rules. Test on real items.
+6. **Tests may need live DB or Redis.** Decide whether to mock or start them.
+7. **`tests/evaluate.py` is a placeholder.** Don't claim measured accuracy from it.
+8. **Playwright may be unused.** Remove it if so.
+9. **Paste damage (new).** Truncated files, wrong folders, tabs vs spaces, missing `__init__.py`, smart quotes from chat apps replacing straight quotes. `compileall` catches most of it.
+
+---
+
+## 6. Work plan
+
+| Stage | Goal | Proof required |
+|---|---|---|
+| 0 | Freeze and inspect pasted state | Checkpoint commit; `compileall` clean; file list reviewed |
+| A | Run the stack | All containers up; `/docs` loads |
+| B | Database | Migrations apply to an empty DB; seed runs |
+| C | Tests | `pytest` summary pasted; failures fixed |
+| D | Scraping | Sample of real scraped items pasted |
+| E | Pipeline | Item traced from Redis to `/api/v1/incidents` |
+| F | Scheduling | Two automatic runs shown |
+| G | Dashboard | Real data visible and filterable |
+| H | Documentation | Docs match reality; checklist walked |
+| I | ML (optional) | Labeled data, trained model, honest evaluation |
+
+Log each finished stage in `STATUS.md` (date, what was verified and how, what changed, what's next). The AI writes the entry; you paste it into the file.
+
+---
+
+## 7. Ground rules (from PROJECT_RULES.md, still binding)
+
+- One tool per job. No MongoDB, Kafka, React, LangChain, CrewAI, AutoGen, or paid APIs. No local LLMs for MVP classification.
+- Respect `robots.txt`; at least 2 seconds between requests to one site; no CAPTCHA bypass; no paywalled or login-gated content; no dark web.
+- Attribute every incident to its source. Store no personal data.
+- Schema changes only through Alembic.
+- PEP 8, type hints, Google-style docstrings.
+- Never mark anything DONE without a command that proved it.
+- Never commit `.env` or real secrets.
+
+---
+
+## 8. Realistic expectations
+
+Achievable: a working, demoable India-focused incident feed with a real API and dashboard, suitable for a hackathon or portfolio. Not achievable without much more work: something CERT-In or a SOC could rely on. That needs more sources, monitoring, human review of classifications, and evaluation on labeled data.

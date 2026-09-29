@@ -6,7 +6,11 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+.coverage
+htmlcov/
 ml/models/*.pt
 ml/models/*.bin
 *.db
 .DS_Store
+dump.rdb
+*.rdb

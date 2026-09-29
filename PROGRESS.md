@@ -1,7 +1,22 @@
 # PROGRESS.md — Living Build Tracker
-<!-- STATUS: ACTIVE | LAST_UPDATED: 2026-09-24 | VERSION: 1.0 -->
+<!-- STATUS: ACTIVE | LAST_UPDATED: 2026-09-29 | VERSION: 1.1 -->
 
 > **Purpose**: Track what has been built, what's in progress, and what's next. **Every AI model or developer MUST update this file after completing any task.**
+
+---
+
+> ⚠️ **VERIFICATION NOTICE (2026-09-29, Stage 0 audit)** — Every `✅ DONE` mark below this notice is an **UNVERIFIED CLAIM** written by a prior AI session on 2026-09-24 that never ran any command. Per project rules, nothing counts as DONE until a successful command proves it. Stage 0 below records the *only* items that have actually been verified as of today.
+
+---
+
+## Stage 0 — Freeze & Inspect (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| 0.1 No syntax errors in any Python file | ✅ VERIFIED | `python -m compileall backend scraper dashboard ml tests -q` → exit 0, no output | Paste damage at grammar level (truncation, indent, smart quotes) ruled out. |
+| 0.2 File structure reviewed against spec | ✅ VERIFIED | `git ls-files` compared line-by-line to PROJECT_RULES.md §3 | Findings: 5 files missing, scraper/ double-nested, tests/ duplicated, 3 extra tracked files, 2 ML files flat not in training/ |
+| 0.3 `__init__.py` in all package dirs | ✅ VERIFIED | `LS` of backend/app/{api,agents,models,schemas,services,utils} and scraper/scraper/{pipelines,spiders} | All present ✅ |
+| 0.4 Git baseline captured | ✅ VERIFIED | `git log --oneline -10` + `git status` | 2 commits total (generic labels); HANDOFF.md modified locally; no secrets leaking in git status |
 
 ---
 
