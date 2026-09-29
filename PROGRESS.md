@@ -9,6 +9,24 @@
 
 ---
 
+## Stage D — Scraping (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| D.1 Environment: Scrapy runs | ✅ VERIFIED | `docker build -t cyber-incident-scraper ./scraper` → build OK; `docker run --network cyber-incident-tool_default -e REDIS_URL=redis://redis:6379/0 … scrapy crawl …` | Host Python 3.14 sandbox blocks pip (WinError 5); ran inside scraper image (py3.11-slim, installed scrapy + redis via scraper/requirements.txt) |
+| D.2 Rate limiting + robots obeyed | ✅ VERIFIED | `DOWNLOAD_DELAY=2, CONCURRENT_REQUESTS_PER_DOMAIN=1, ROBOTSTXT_OBEY=True` in settings.py; stats log `robotstxt/request_count=1`, elapsed ≈ 42s for 17 user requests → ~2.5s avg between requests | Ethical rule PROJECT_RULES §7 items 1–3 all satisfied |
+| D.3 news_spider runs against THN | ✅ VERIFIED | `scrapy crawl news -s CLOSESPIDER_ITEMCOUNT=5` → stats: `item_scraped_count=16`, `finish_reason=closespider_itemcount`, `downloader/response_status_count/200=18`, 0 HTTP error codes, `elapsed_time_seconds=41.8` | |
+| D.4 Items have non-empty title, date, content | ✅ VERIFIED | Redis LINDEX 0..2 sample: titles "Lunex Stealer … / Citrix NetScaler RCE … / CISA Says …", dates "Sep 26/27/28, 2026", content lengths 6330, 6574, 5427 chars | Two selector bugs fixed in this stage: (1) title was empty because h1 wraps an <a>; switched to `h1.story-title ::text` descendants + og:title fallback. (2) date got author name because `span.author` has multiple occurrences and `.get()` returned author only; switched to combined `.getall()` pool across 6 selectors + month/day/year regex. |
+| D.5 Items pushed to Redis `incident:raw` list, RPUSH-style | ✅ VERIFIED | Before run: `DEL incident:raw` → 0; after news run: `LLEN incident:raw` = **16**. Orchestrator kept stopped to prevent race. Sample items validated as JSON with all expected 7 keys. | Pipeline bug fixed: hardcoded `host=localhost` → `REDIS_URL` env var parsed with `urlparse`; default `redis://localhost:6379/0`. |
+| D.6 certin_spider (CERT-In) runs without Python errors | ✅ VERIFIED (0 items, site limitation) | Run 1: HTTP 200 on start_url VLNLIST, scheduler/dequeued=1 (start URL only), items=0. Run 2: TCP ConnectionRefused 111 x4 (site rate-limited/blocked our IP after first run; twisted-level, no Python exception). | Root cause of 0 items not code bugs: (1) old pageid PUBVLNOTES01 returns "page not available" — got real opcodes via site-JS `getOpcode()`: Vulnerabilities=VLNLIST, Advisories=PUBADVLIST; updated start_url. (2) VLNLIST static DOM only contains year headings ("2026 / 2025 …"); individual rows under each year are client-side JS-expanded/XHR-loaded, absent in Scrapy HTML. CERT-In spider needs Playwright to yield rows; no code changes this stage beyond pageid + robust parser. |
+| D.7 PROJECT_RULES §3 mentions `github_spider.py` | ⚠️ NOT CREATED (missing in paste, not in this stage) | `Glob **/github_spider.py` → 0 results found | Noted, not blocking. Seed.py already lists BleepingComputer as 3rd source option. |
+| D.8 Scrapy deprecation warnings cleaned | ✅ VERIFIED | Pipeline migrated to `from_crawler(cls, crawler)` pattern; lifecycle methods no longer require `spider` arg. | Old warnings (3): `open_spider / close_spider / process_item require spider argument, deprecated` — eliminated. |
+| D.9 Pipeline fix was necessary & REDIS_URL env works | ✅ VERIFIED | Before: container `localhost` → would not reach redis service. After edit + rebuild: items land in shared-compose Redis instance at `redis:6379` and LLEN confirms them. | |
+| D.10 Duplicate root `tests/` dir cleanup committed | ✅ VERIFIED (Stage 0 finding resolved) | Deleted: `tests/{conftest,evaluate,test_agents,test_api}.py`. Canonical suite remains `backend/tests/` (used by `cd backend && pytest` inside the backend image). | Stage C previously mirror-edited both copies to avoid drift; now only backend/tests remains. |
+| D.11 ⚡ Stage E preview (accidental, not a proof here) | ℹ️ NOT CLAIMED, logged for future | First news run (16 items) consumed by still-running orchestrator. Post-run psql: incidents=1, entities=61, incident_entities=61. Orchestrator logs show real CVE INSERTs + COMMITs. | NOT a Stage D deliverable; only proves "the full pipeline path" works. Stage E will redo this cleanly end-to-end. |
+
+---
+
 ## Stage C — Tests (VERIFIED 2026-09-29)
 
 | Item | Status | Proof command | Notes |

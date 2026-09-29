@@ -1,19 +1,32 @@
 import json
+import os
 import redis
 from datetime import datetime, timezone
+from urllib.parse import urlparse
+
 
 class RedisQueuePipeline:
-    def __init__(self):
-        self.redis_client = None
+    def __init__(self, redis_client: redis.Redis):
+        self.redis_client = redis_client
 
-    def open_spider(self, spider):
-        self.redis_client = redis.Redis(host="localhost", port=6379, db=0)
+    @classmethod
+    def from_crawler(cls, crawler):
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        parsed = urlparse(redis_url)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 6379
+        db = int(parsed.path.lstrip("/") or "0")
+        client = redis.Redis(host=host, port=port, db=db)
+        return cls(redis_client=client)
 
-    def close_spider(self, spider):
+    def open_spider(self):
+        pass
+
+    def close_spider(self):
         if self.redis_client:
             self.redis_client.close()
 
-    def process_item(self, item, spider):
+    def process_item(self, item):
         article = {
             "source_name": item.get("source_name"),
             "source_url": item.get("source_url"),

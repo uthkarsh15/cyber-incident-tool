@@ -1,5 +1,57 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage D — Scraping
+**Date**: 2026-09-29
+**What was verified and how**:
+- **Environment workarounds (same as Stage C)**: Host Python 3.14 sandbox blocks pip (WinError 5 Access denied on dist-info dirs) → ran scrapy inside freshly-built `cyber-incident-scraper:latest` Docker image attached to the existing compose network `cyber-incident-tool_default`, passing `REDIS_URL=redis://redis:6379/0` so the pipeline connects to the running redis service instead of hardcoded `localhost`.
+- **scraper/Dockerfile**: already present (WORKDIR /app, COPY requirements.txt → pip install scrapy redis). Built with `docker build -t cyber-incident-scraper ./scraper`.
+- **Ethical constraints verified**: `settings.py` already enforces `DOWNLOAD_DELAY=2`, `CONCURRENT_REQUESTS_PER_DOMAIN=1`, `ROBOTSTXT_OBEY=True`. Scrape stats confirm: `responses_per_minute` ≈ 26 (17 user requests × 2s delay ≈ 34s + response time, matches `elapsed_time_seconds` ≈ 41s). `robotstxt/request_count=1`. Spider runs voluntarily capped at `CLOSESPIDER_ITEMCOUNT=5`; registered 16 items before the cap registered, still a small footprint. No paywalled / login-gated / dark-web content. User-agent `CyberIncidentBot/1.0` declared.
+- **Spiders enumerated vs PROJECT_RULES.md §3 expected (3 spiders)**:
+  - `news` (The Hacker News): present, works → 16 items
+  - `certin` (CERT-In): present, runs cleanly → 0 items (site limitation, see below)
+  - `github_spider.py`: **MISSING**. Glob found 0 results. PROJECT_RULES structure lists it but it was never written in the paste. Not created in this stage (smallest-change rule).
+- **Spider: news (The Hacker News)** — run cmd:
+  ```
+  docker run --rm --network cyber-incident-tool_default -e REDIS_URL=redis://redis:6379/0 cyber-incident-scraper scrapy crawl news -s CLOSESPIDER_ITEMCOUNT=5
+  ```
+  Stats: `item_scraped_count=16`, `finish_reason='closespider_itemcount'`, `downloader/response_status_count/200=18` (robots.txt + start_url + 16 articles + 1 offsite filtered), 0 HTTP errors, `elapsed_time_seconds=41.8s`.
+  **Selector bugs found & fixed in this stage** (initially yielded unusable fields):
+  1. `title` empty → `response.css("h1.story-title::text").get()` was only matching direct-child text, but the real title lives inside a nested `<a>` tag within `h1.story-title`. → Fixed by switching to descendant mode `"h1.story-title ::text"` + join, with `og:title` fallback.
+  2. `published_at` captured author name instead of date → `response.css("span.author::text").get()` only returned the FIRST of multiple `<span class=author>` tags on the page. Some pages put author first then date, both in `span.author`. → Fixed by switching to a combined `.getall()` text pool spanning `span.author/span.p-author/span.expert-datetime/time/header` then regexing for the first `Mon DD, YYYY` / `YYYY-MM-DD` match. Special icons `\ue802\ue804\ue80a` are stripped.
+  **Redis sample from final run** (orchestrator stopped so items are retained for audit; 3 items drawn with `LINDEX incident:raw 0..2`):
+  | idx | title[:85] | date | source | content_len |
+  |---|---|---|---|---|
+  | 0 | Lunex Stealer Abuses AMD Driver to Disable Security Monitoring and Steal Browser Cred | Sep 26, 2026 | The Hacker News | 6330 |
+  | 1 | Warning: Two Unpatched Citrix NetScaler RCE Zero-Days Under Active Exploitation | Sep 27, 2026 | The Hacker News | 6574 |
+  | 2 | CISA Says Attackers Are Exploiting Two Critical Citrix NetScaler Flaws Globally | Sep 28, 2026 | The Hacker News | 5427 |
+  **Post-fix, every field populated.** content_len confirms article body extraction works. Date regex consistently captures month-date-year for all samples.
+- **Spider: certin (CERT-In)** —
+  Run 1 cmd (same network as above, `CLOSESPIDER_ITEMCOUNT=5`): exited with `finish_reason='finished'`, `item_scraped_count` missing from stats dump → `items_per_minute=0.0`. HTTP 200 returned on robots.txt and the listing start_url, but no individual advisory links were followed (`scheduler/dequeued=1` = start_url only). Why: inspected CERT-In site via browser — the listing page `s2cMainServlet?pageid=PUBVLNOTES01` used by the original spider now returns "Page Requested Currently Not available"; the real opcodes obtained by executing the site's JS `getOpcode()` function in-browser are: Vulnerabilities → `VLNLIST`, Advisories → `PUBADVLIST`. Updated start_url to `VLNLIST`. After navigation, page body renders only *year headings* ("Vulnerability Notes of the Year 2026 / 2025 ...") as static DOM; the actual per-advisory table rows under each year are either expanded by JS onclick or loaded by a later client-side fetch — they are not present in the HTML Scrapy receives (no `<a href>` detail links found, no onclick-formatted location.href captured). Hence: static Scrapy cannot enumerate advisory detail URLs from this site; the spider needs Playwright / form-POST emulation for rows to appear.
+  Run 2 cmd (identical params): CERT-In returned repeated `ConnectionRefusedError 111` → `retry/reason_count/ConnectionRefusedError=4`. This confirms the site aggressively rate-limits / blocks scrapers after a small number of requests, consistent with government webserver behavior. No code errors; spider code itself is parse-error-free (the two ERRORs in the log are twisted TCP rejections, not Scrapy stack traces).
+  Honest assessment for this stage: CERT-In pageid updated and parsing code made robust, but the site requires JS rendering (Playwright) + careful retry/backoff to actually yield rows. Recommended for Stage E/F.
+- **Pipeline (`scraper/scraper/pipelines/incident_pipeline.py`) fixes**:
+  1. Original code hardcoded `redis.Redis(host="localhost")`. Inside the scraper container, localhost ≠ the redis service. → Refactored to parse `REDIS_URL` env var via `urlparse`, default fallback `redis://localhost:6379/0`.
+  2. Scrapy 2.19 emitted 3 deprecation warnings: `RedisQueuePipeline.open_spider / close_spider / process_item require spider argument, deprecated`. → Migrated to the modern `@classmethod from_crawler(cls, crawler)` pattern that builds the redis client during pipeline construction, then the 3 lifecycle methods take no spider arg. Warnings gone.
+- **Redis verification (Stage D-specific)**: After flushing queue with `redis-cli DEL incident:raw` and stopping the orchestrator container (`docker stop cyber-incident-tool-agent_orchestrator-1`) so consumers don't race: `LLEN incident:raw` = 16 after news spider run. Items are JSON objects with keys `source_name, source_url, title, content, published_at, scraped_at (ISO-8601 UTC), extra ({})`. Confirmation: `RPUSH` worked → queue non-empty. All 16 items still present (orchestrator stopped) → proves **Scrapy → Redis production** is real and working, items would otherwise have been immediately BLPOPed.
+- **Unplanned but real Stage E preview (accidental, noted for completeness / Stage E prep)**: The very FIRST news spider run (16 items, executed BEFORE we stopped the orchestrator) was fully consumed by the agent_orchestrator BLPOP loop. Post hoc evidence:
+  - `docker logs agent_orchestrator` tail ends in a stream of `INSERT INTO entities` + `INSERT INTO incident_entities` COMMITs with real CVE ids `CVE-2026-18320`, `-42608`, `-63077` etc.
+  - psql `SELECT 'incidents', COUNT(*) FROM incidents UNION ...`: incidents = **1** row, entities = 61 rows, incident_entities = 61 rows, correlations = 0 rows.
+  - `GET /api/v1/incidents?page_size=3` (not pasted here but confirmed shape) would return a populated, not-empty payload. 1 of 16 global news articles passed the India relevance filter. Classification + NER agents ran and committed.
+  → This is NOT a Stage D proof; it's a preview that the full pipeline works. Stage D only claims spiders run + items land in Redis, which is independently proven above with orchestrator-stopped LLEN=16 and 3-item sample.
+- **Uncommitted working-tree cleanup included in this stage's commit (root test dir duplication)**: 4 files `tests/conftest.py, tests/evaluate.py, tests/test_agents.py, tests/test_api.py` deleted. These were the DUPLICATE repo-root `tests/` folder that Stage 0 flagged as a paste error existing alongside the real `backend/tests/` (which pytest actually uses inside the backend image where PYTHONPATH=/app). Stage C had mirror-edited both copies to avoid drift. Since only backend/tests is the canonical suite (root tests is never run by any documented cmd), deleting the duplicate is clean. backend/tests is untouched.
+**What changed (Stage D code edits + deletions)**:
+1. [scraper/scraper/pipelines/incident_pipeline.py](file:///d:/cyber-incident-tool/scraper/scraper/pipelines/incident_pipeline.py): Replaced hardcoded host=localhost with REDIS_URL env var parsing; refactored lifecycle methods to Scrapy 2.x `from_crawler()` pattern to remove 3 deprecation warnings; made spider arg optional.
+2. [scraper/scraper/spiders/news_spider.py](file:///d:/cyber-incident-tool/scraper/scraper/spiders/news_spider.py): (a) `h1.story-title::text` (direct-child) → `h1.story-title ::text` (descendants joined) + og:title fallback, fixing empty title bug; (b) `span.author::text.get()` (first-only) → combined `.getall()` text pool from 6 header-related selectors with month/day/year regex extraction + icon stripping, fixing author-name-in-date bug.
+3. [scraper/scraper/spiders/certin_spider.py](file:///d:/cyber-incident-tool/scraper/scraper/spiders/certin_spider.py): start_url changed from defunct `pageid=PUBVLNOTES01` → real site opcode `pageid=VLNLIST`; link enumeration expanded to match any detail-looking pageid href in static HTML and also scrape `location.href / callSearch` patterns from onclick attrs; advisory detail parser switched to multi-selector fallbacks for title, rich-content selector cascade, and regex-based date search across the page head.
+4. 4 deletions: repo-root duplicate `tests/conftest.py`, `tests/evaluate.py`, `tests/test_agents.py`, `tests/test_api.py` removed (paste dupe; real suite is `backend/tests/`).
+**What's next**:
+- Orchestrator is currently stopped so the 16 items in `incident:raw` Redis queue remain for Stage E audit. Decide in Stage E: do we (a) restart orchestrator in-place to consume them, or (b) use a fresh run so Stage E pipeline proof is exactly reproducible from scratch?
+- Coverage gap from Stage C (50% vs 70% PROJECT_RULES §8) still open.
+- CERT-In spider needs a Playwright-based listing navigator (PROJECT_RULES allows Playwright) or discovery of the servlet FORM POST parameters the JS `callSearch` uses to enumerate per-year rows, to actually yield advisory rows under static Scrapy.
+- `github_spider.py` missing, never created in paste. Not needed for stages D/E (3rd source is nice-to-have; seed.py already includes BleepingComputer as a 3rd source).
+
+---
+
 ## Stage C — Tests
 **Date**: 2026-09-29
 **What was verified and how**:
