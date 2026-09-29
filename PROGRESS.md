@@ -9,6 +9,22 @@
 
 ---
 
+## Stage B — Database seed (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| B.1 Seed script located | ✅ VERIFIED | `Glob **/*seed*.py` → 1 result: backend/app/utils/seed.py | None in ml/; scripts/ dir doesn't exist |
+| B.2 Seed runs cleanly against live DB | ✅ VERIFIED | `docker exec backend python -m app.utils.seed` → exit 0, "Database seeded successfully." | 13 sector INSERTs + 3 source INSERTs + 1 COMMIT visible in echo output |
+| B.3 DB counts: sectors=13, sources=3, incidents=0 | ✅ VERIFIED | `docker exec db psql -c "SELECT 'sectors',COUNT(*) UNION ALL ..."` → sectors=13 sources=3 incidents=0 entities=0 | Seed script has ZERO incident rows (intentional) |
+| B.4 Sectors & sources sample rows match seed data | ✅ VERIFIED | psql SELECT code,name FROM sectors → 13 rows exactly matching SEED_SECTORS; sources → 3 rows matching SEED_SOURCES with is_active=t | UUIDs stable, URLs correct, source_types correct |
+| B.5 Seed idempotent on re-run | ✅ VERIFIED | Second `python -m app.utils.seed` → 0 new INSERTs; post-re-run counts still 13/3 | SELECT-then-skip-insert logic works |
+| B.6 API /sources returns seeded data | ✅ VERIFIED | `curl :8000/api/v1/sources` → 3 objects HTTP 200; ids match psql sample exactly | response_model=list[SourceResponse] works |
+| B.7 API /incidents still returns valid empty schema (0 rows expected) | ✅ VERIFIED | `curl :8000/api/v1/incidents` → `{"total":0,"page":1,"page_size":20,"incidents":[]}` | Correct — seed has no incidents |
+| B.8 Stats endpoint exercises seeded sectors | ✅ VERIFIED | `curl :8000/api/v1/stats/overview` → by_sector lists all 13 sector names with count 0 | sectors+stats join path proven end-to-end |
+| B.9 ⚠️ No incident seed rows provided by shipped script | ⚠️ NOTED (not blocked, needs your call) | source of seed.py — SEED_SECTORS + SEED_SOURCES only, no Incident data | /incidents can only show non-empty after a hand-written seed-incidents insert OR after Stage D scraping. Recommend: proceed to Stage C (pytest uses in-memory SQLite, doesn't need seeded PG) |
+
+---
+
 ## Stage A — Run the stack (VERIFIED 2026-09-29)
 
 | Item | Status | Proof command | Notes |

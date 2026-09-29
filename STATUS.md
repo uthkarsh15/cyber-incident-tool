@@ -1,5 +1,33 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage B — Database seed
+**Date**: 2026-09-29
+**What was verified and how**:
+- Seed script location: **found 1 candidate only** — [backend/app/utils/seed.py](file:///d:/cyber-incident-tool/backend/app/utils/seed.py). No seed scripts in `ml/` (dataset_exporter, train_classifier, train_ner are unrelated), no `scripts/` directory exists.
+- Seed script behaviour (from source read): defines `SEED_SECTORS` (13 rows: government, banking_finance, healthcare, energy_power, telecom, defence, transportation, education, it_ites, manufacturing, media, retail_ecommerce, other) + `SEED_SOURCES` (3 rows: CERT-In government_advisory, The Hacker News news_article, BleepingComputer news_article). **Deliberately inserts ZERO incidents.** Idempotent: does SELECT-then-skip-insert (per Sector.code / Source.name). Entrypoint: `if __name__ == "__main__": asyncio.run(seed_db())`.
+- Invocation (against the live Stage A backend container): `docker exec cyber-incident-tool-backend-1 python -m app.utils.seed` → exit 0, final line `Database seeded successfully.` (full SQLAlchemy echo output captured, showing 13 sectors INSERTs + 3 sources INSERTs + 1 COMMIT).
+- Direct DB row counts (psql UNION query against postgres container):
+  | table | count |
+  |---|---|
+  | sectors | 13 |
+  | sources | 3 |
+  | incidents | 0 |
+  | entities | 0 |
+  All sample sectors 13 rows SELECTed match the code/name list exactly. All 3 sources (CERT-In, The Hacker News, BleepingComputer) show `is_active = t` and correct URLs/source_types.
+- Idempotency re-run: second `python -m app.utils.seed` prints only SELECTs + COMMIT, no new INSERTs. Row count still sectors=13 / sources=3. Confirmed no double-seeding.
+- API verification (curl from host):
+  - `GET /api/v1/sources` → HTTP 200, 3 objects, each with correct `id,name,url,source_type,is_active,created_at,updated_at`. UUIDs in output match DB sample exactly. ✅
+  - `GET /api/v1/incidents` → HTTP 200, `{"total":0,"page":1,"page_size":20,"incidents":[]}`. **Correctly still 0** — seed.py has no incident seed data. ✅ (This is expected per script source.)
+  - `GET /api/v1/stats/overview` → HTTP 200, `total:0, by_sector:` lists all 13 sector names with 0 counts. Proves sectors and stats endpoint work end-to-end.
+- ⚠️ **Plan-impacting note**: seed script intentionally contains NO incident sample rows. Therefore the `/api/v1/incidents` endpoint cannot be exercised with real incident payloads until either: (a) we hand-craft a small seed-incidents insert (your decision, I won't write it unprompted), or (b) Stage D (real scraping) produces the first rows. The API endpoint path IS proven to work (correct 200 JSON shape with 0 rows), but schema correctness for non-empty rows will need Stage D data or a deliberate seed-incidents script — your call.
+**What changed**:
+- No source code changes in Stage B (seed already present and worked first-shot).
+- Database state changed: 13 sectors + 3 sources materialized in the docker-compose postgres volume (persists across `docker compose up/down`, survives as long as pgdata volume isn't `-v` wiped).
+**What's next**:
+- Your decision point first: do we (Option 1) hand-write a small 3–5 row sample incident seed so `/incidents` returns populated data before Stage D, OR (Option 2) go straight to Stage C pytest (we don't need incident rows for tests, which use SQLite in-memory + fixtures anyway), then do Stage D for real incident data? Recommended: Option 2 (proceed to Stage C tests now — Stage B goal was seed data, and seed was exactly what the shipped script provided; incident validation will come via Stage D).
+
+---
+
 ## Stage A — Run the stack
 **Date**: 2026-09-29
 **What was verified and how**:
