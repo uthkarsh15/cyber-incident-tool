@@ -9,6 +9,22 @@
 
 ---
 
+## Stage C — Tests (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| C.1 pytest suite runs | ✅ VERIFIED | `docker exec backend python -m pytest -v --tb=short` → exit 0, 5 passed in 1.17s | Host Python 3.14 sandbox blocked greenlet pip install; ran inside backend container (has all deps via requirements.txt) |
+| C.2 Every test name + status listed | ✅ VERIFIED | Exact names in STATUS.md Stage C entry | test_relevance_agent_high_score ✅, test_relevance_agent_low_score ✅, test_root_endpoint ✅, test_health_endpoint ✅, test_get_incidents_empty ✅ — 5/5 PASSED |
+| C.3 Import-error pre-fix catalogued | ✅ VERIFIED | `pytest` before fix → 1 collection error: `ModuleNotFoundError: No module named 'backend'` | test_agents.py used non-existent `from backend.app.agents…` inside container (package name is `app.agents…`) |
+| C.4 Root-cause fix (not symptom/weakening) | ✅ VERIFIED | Edited 2 lines only: backend/tests/test_agents.py#L2, tests/test_agents.py#L2 | `from backend.app.agents.relevance_agent` → `from app.agents.relevance_agent`. No tests deleted/skipped/weakened. |
+| C.5 0 skipped tests | ✅ VERIFIED | No SKIPPED rows in output; source of test_*.py inspected for @pytest.mark.skip → none | All 5 collected tests actually ran and asserted. |
+| C.6 Coverage measured explicitly with --cov | ✅ VERIFIED | `docker exec backend python -m pytest --cov=app --cov-report=term-missing` → **overall 50% (609 stmts / 307 miss)** | ⚠️ Below 70% required in PROJECT_RULES.md §8. Noted. |
+| C.7 Coverage gaps catalogued | ✅ VERIFIED | 14 modules at 0%: classification_agent, correlation_agent, insight_agent, orchestrator, seed.py (+ empty stubs scraper_agent, visualization_agent vacuously 100%) | Poor coverage: feed_service 26%, incident_service 30%, stats 48%, sources 61%, incidents route 64% |
+| C.8 Untested major components flagged | ✅ VERIFIED | Audit in STATUS.md Stage C → 14-row table | Models (SQL behaviour), scraper package, migrations, dashboard, seed.py, all other agents → **ZERO dedicated tests**. Only relevance_agent + root/health/GET_incidents routes tested. |
+| C.9 Decision on 70% rule | ⚠️ PENDING (your call) | Current 50% → either (a) write minimal targeted suite to bridge gap before Stage D, or (b) defer 70% to Stage G and proceed to D with coverage gap acknowledged | Recommended: proceed to D; coverage additions can land in parallel step after Stage E pipeline works end-to-end |
+
+---
+
 ## Stage B — Database seed (VERIFIED 2026-09-29)
 
 | Item | Status | Proof command | Notes |

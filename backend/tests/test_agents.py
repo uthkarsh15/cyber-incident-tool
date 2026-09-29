@@ -1,5 +1,5 @@
 import pytest
-from backend.app.agents.relevance_agent import RelevanceAgent
+from app.agents.relevance_agent import RelevanceAgent
 
 @pytest.mark.asyncio
 async def test_relevance_agent_high_score():
