@@ -1,5 +1,115 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage E — End-to-end Pipeline Trace (Option A)
+**Date**: 2026-09-29
+**What was verified and how**:
+
+**Pre-flight audit (before any restart):
+- `git log --oneline -10` → HEAD at `09730c0` (Stage D). No Stage E commit existed yet.
+- `git status --short` → 1 untracked `_tmp_trace.py` (leftover debug script from interrupted run; deleted before restart).
+- `redis-cli LLEN incident:raw` → **0** (queue empty — items had been consumed by previous orchestrator restart.
+- `docker ps` → all 5 containers Up; `agent_orchestrator` Up 13 minutes (others Up 4 hours) → orchestrator was mid-session restarted.
+- STATUS.md claimed only Stage D entry existed; no Stage E entry written. Previous run had written accidental "preview" preview" in Stage D notes 1 incident, entities=61.
+- Postgres reality (psql UNION query vs STATUS.md claim): incidents=**2** rows (not 1!):
+  - Row #1 (09:36:45) — **empty title, source_id NULL, published_at NULL (corrupted #2 (10:14:14) — Citrix NetScaler article, source_id NULL, published_at NULL.
+- `GET /api/v1/incidents` returned HTTP 500 `Internal Server Error`. Backend traceback:
+  ```
+  pydantic_core._pydantic_core.ValidationError: 2 validation errors IncidentListResponse
+  incidents.0.metadata Input should be a valid dictionary [type=dict_type, input_value=MetaData(), input_type=MetaData]
+  ```
+  → Both rows had `source_id published_at NULL, `published_at NULL, AND `metadata` Pydantic tried to read ORM `.metadata` attribute hit SQLAlchemy `DeclarativeBase.metadata` MetaData() registry object, the column value.
+- Decision: Stage E clean restart needed.
+
+**Root cause analysis and fixes applied (3 bugs):
+
+**Bug 1 — `metadata` column API 500**:
+- ORM model: `metadata_ = Column("metadata", JSONB, default={})`
+- Schema `metadata` in `IncidentCreate` and `IncidentResponse` use name `metadata`; Pydantic `from_attributes=True` reads `.metadata` → got SQLAlchemy's base registry `MetaData()` instead of JSONB dict.
+- WRITE path: `Incident(**data.model_dump())` unpacked keyword `metadata=` which ORM attribute was not set correctly
+- Fixes:
+  1. [backend/app/schemas/incident.py](file:///d:/cyber-incident-tool/backend/app/schemas/incident.py): `IncidentCreate.metadata` → `Field(serialization_alias="metadata_")`; `IncidentResponse.metadata` → `Field(validation_alias="metadata_")`; `IncidentResponse.model_config` added `populate_by_name=True`.
+  2. [backend/app/services/incident_service.py](file:///d:/cyber-incident-tool/backend/app/services/incident_service.py#L7-L14): `create_incident()` now pops `metadata` key from model_dump dict and re-adds as `metadata_` before `Incident(**payload)`.
+  3. [backend/app/agents/insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py#L98-L100): Same remap in `_save_to_database()` before constructing ORM Incident.
+
+**Bug 2 — `source_id` always NULL**
+- Root cause: insight_agent._save_to_database() built `IncidentCreate(...) with no `source_id=` lookup.
+- Fix ([insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py#L76-L79): Added `SELECT id FROM sources WHERE name = data["source_name"]` and assign to IncidentCreate.source_id. Imported `Source` model.
+
+**Bug 3 — `published_at` always NULL**
+- Root cause: (a) IncidentCreate call never included `published_at=` arg. (b) Redis JSON deserializes spider-published_at` as string ("Sep 28, 2026"), not a datetime object; needs manual parsing into timestamp type in schema.
+- Fix ([insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py#L41-L67):
+  1. New static `_parse_published_at(raw) with formatters ["%b %d, %Y", "%Y-%m-%d", several ISO-8601 variants plus fromisoformat fallback.
+  2. `IncidentCreate(now includes `published_at=parsed value).
+
+Clean-state preparation:
+- Compileall clean on host: `python -m compileall backend/app -q` → exit 0, zero warnings.
+- Rebuilt backend + agent_orchestrator images (`docker compose build backend agent_orchestrator` → both Built successfully.
+- Recreated containers with new images.
+- Deleted corrupted PG rows: `DELETE FROM incident_entities; DELETE FROM correlations; DELETE FROM incidents; DELETE FROM entities;` → post-cleanup counts: incidents=0 entities=0 incident_entities=0 correlations=0 sources=3 sectors=13 preserved.
+- Pytest inside new backend image: 5/5 PASSED (no regressions; coverage now 47% because insight_agent grew by ~30 new statements all at 0%).
+- Redis: `redis-cli DEL incident:raw` → LLEN=0.
+
+Option A Trace — Single-item end-to-end trace, orchestrator stopped kept stopped to prove spider → redis independently first):
+- `docker stop agent_orchestrator` → Status Exited (137).
+- News spider run inside scraper image compose network with `REDIS_URL=redis://redis:6379/0 -s CLOSESPIDER_ITEMCOUNT=1 → `stats: `item_scraped_count=16 `finish_reason=closespider_itemcount`.
+- Redis LLEN=16 (Scrapy yields in bulk before cap registers; only idx=6 item relevance scan all 16 items for india_relevance >= 0.40
+- Found only **idx=6 Weekly Recap: $387M Crypto Hack..." → score 0.60 passes (matches Stage D "1 of 16. India relevance filter)
+- Pruned queue to keepidx to 0–5 (6× LPOP, LTRIM incident:raw 0 0 → post-prune LLEN=1.
+
+Option A Trace — Step 2: orchestrator consume + pipeline run):
+- Start orchestrator, BLPOP consumes queue; LLEN goes to 0.
+- Orchestrator logs show full agent chain all 4 agents ran end:
+  - `relevance_agent kept item (score 0.60 > 0.40)
+  - `classification_agent` assigned attack_type=ransomware, severity=critical, confidence_score=1.0, sector_code=government
+  - `correlation_agent` passed through (no other incident in DB → no correlation → no dedup → no correlation rows → 0 correlations
+  - `insight_agent extracted 61 CVE regex matches; all 61 Entity rows created; all 61 IncidentEntity join rows inserted; incident_id `e163c9f8-af20-417c-aefe-a1bbdeb1081e committed.
+
+Option A Trace — Step 3: Postgres verification (psql ground truth after):
+```
+tbl             | count
+----------------+-------
+incidents       | 1
+entities        | 61 (all cve_id)
+incident_entities | 61
+correlations    | 0
+sources         | 3
+sectors         | 13
+```
+
+Incident row detail:
+| field | value | notes |
+|---|---|---|
+| id | `e163c9f8-af20-417c-aefe-a1bbdeb1081e` | |
+| **source_name | **"The Hacker News" | **source_id_set = True** (← Bug 2 fixed) |
+| title | "⚡ Weekly Recap: $387M Crypto Hack, Citrix Exploits, AI Agents Go Off-Script..." | non-empty ✓ |
+| **published_at_set** | **2026-09-28 00:00:00+00** ← Bug 3 fixed (parsed from "Sep 28, 2026") |
+| attack_type | ransomware | classification_agent output |
+| severity | critical | |
+| india_relevance_score | 0.6 | relevance_agent output |
+| sector_code | government | classification_agent output |
+| confidence_score | 1.0 | |
+| metadata_col | `{}` | JSONB dict (← Bug 1 fixed; stored as valid dict not MetaData()) ✓ |
+| entity_count | **61 CVE_ids | regex-based entity extraction working |
+
+Option A Trace — Step 4: API verification (after fixes, no more HTTP 500):
+- `curl :8000/api/v1/incidents?page_size=5` → **HTTP 200**
+  - total=1, page=1, page_size=5
+  - incident 0: all 13 fields present with correct types:
+    source_id non-null UUID, published_at="2026-09-28T00:00:00Z", metadata=dict(keys=[])
+- `curl :8000/api/v1/incidents/e163c9f8-af20-417c-aefe-a1bbdeb1081e` → **HTTP 200**, every field populated identically.
+
+Test suite re-run after all edits:
+  `docker exec backend python -m pytest -v --tb=short` → 5/5 PASSED in 1.54s (identical to Stage C results, no regressions, no skipped tests.
+
+**What changed (stage code edits):**
+1. [backend/app/schemas/incident.py](file:///d:/cyber-incident-tool/backend/app/schemas/incident.py) — Line 24: `IncidentCreate.metadata` gets Field with `serialization_alias="metadata_";` Line 43: `IncidentResponse.metadata` Field with `validation_alias="metadata_"`; Line 49: `IncidentResponse.model_config` updated to include `populate_by_name=True`.
+2. [backend/app/services/incident_service.py](file:///d:/cyber-incident-tool/backend/app/services/incident_service.py#L7-L14) — `create_incident()` maps `metadata` dict key to ORM attribute `metadata_` before ORM Incident constructor.
+3. [backend/app/agents/insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py) — (a) imported `from datetime import datetime` and Source model; (b) new `_parse_published_at()` static helper with 8 date formatters + fromisoformat fallback; (c) `_save_to_database()` now queries Source.id by Source.name matching source_name for source_id FK assignment; (d) passes published_at=parsed value into IncidentCreate; (e) maps metadata → metadata_ in payload before ORM Incident construction; (f) `await session.refresh(incident)` after first commit so incident.id is available for IncidentEntity FK; (g) assigns `data["incident_id"] = str(incident.id)` post-commit for downstream traceability.
+
+Coverage still below 70% PROJECT_RULES.md §8 requirement (current 47%, dropped because insight_agent grew by ~30 new, noted open; all other modules unchanged from Stage C coverage numbers).github_spider.py still missing (was never written, not blocking Stages D/E). CERT-In spider still needs Playwright for JS-rendered advisory rows (needs next stage decision).
+
+---
+
 ## Stage D — Scraping
 **Date**: 2026-09-29
 **What was verified and how**:

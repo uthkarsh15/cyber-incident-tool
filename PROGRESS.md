@@ -1,11 +1,27 @@
 # PROGRESS.md — Living Build Tracker
-<!-- STATUS: ACTIVE | LAST_UPDATED: 2026-09-29 | VERSION: 1.1 -->
+<!-- STATUS: ACTIVE | LAST_UPDATED: 2026-09-29 | VERSION: 1.2 -->
 
 > **Purpose**: Track what has been built, what's in progress, and what's next. **Every AI model or developer MUST update this file after completing any task.**
 
 ---
 
 > ⚠️ **VERIFICATION NOTICE (2026-09-29, Stage 0 audit)** — Every `✅ DONE` mark below this notice is an **UNVERIFIED CLAIM** written by a prior AI session on 2026-09-24 that never ran any command. Per project rules, nothing counts as DONE until a successful command proves it. Stage 0 below records the *only* items that have actually been verified as of today.
+
+---
+
+## Stage E — End-to-end Pipeline Trace (Option A) (VERIFIED 2026-09-29)
+
+| Item | Status | Proof command | Notes |
+|---|---|---|---|
+| E.1 Pre-flight audit (git / Redis / Docker / PG / STATUS.md claims vs reality | ✅ VERIFIED | `git log`, `git status`, `redis-cli LLEN`, `docker ps`, psql UNION + incidents SELECT | Reality contradicted STATUS.md: 2 corrupted rows existed (not 1 preview claimed); 1 had empty title; both source_id=NULL and published_at=NULL; API returned 500 MetaData() validation error. All docs had not been updated. |
+| E.2 Root cause of 3 pipeline bugs identified | ✅ VERIFIED | Read incident.py model/schema, incident_service, insight_agent | (1) metadata column: ORM attr `metadata_` vs schema name `metadata` → Pydantic reads SQLAlchemy MetaData() object, not JSONB dict. (2) source_id never looked up by insight_agent. (3) published_at never passed nor parsed from date string format. |
+| E.3 3 pipeline bugs fixed (schema/service + agent code edits applied) | ✅ VERIFIED | python -m compileall backend/app -q → exit 0; docker compose build backend agent_orchestrator → Built both built; docker exec backend pytest 5/5 PASSED | 3 files, 51 insertions, 6 deletions. pytest 0 regressions. |
+| E.4 Clean state before trace | ✅ VERIFIED | redis-cli DEL incident:raw → LLEN=0; psql DELETE incidents/entities/IE/correlations; 0 rows; 3 sources 13 sectors preserved; orchestrator Exited before scrape (so spider runs independent proof | ✅ VERIFIED | `docker stop agent_orchestrator; docker run --network cyber-incident-tool_default scrapy crawl news -s CLOSESPIDER_ITEMCOUNT=1; redis-cli LLEN=16 | LLEN=16 | Scrapy CLOSESPIDER_ITEMCOUNT bulk yields 16 items then cap registers. |
+| E.6 Queue pruned to 1 India-relevant item | ✅ VERIFIED | Per-item LINDEX + python relevance scoring of 16 items; 0-15; LPOP x6; LTRIM 0; post: LLEN=1; idx=6 Weekly 0.60 passes filter (1 of 16 real scraped articles passes threshold 0.40 |
+| E.7 Orchestrator consumes single item through 4 agents | ✅ VERIFIED | docker start agent_orchestrator; docker logs tail 50 → INSERT INTO incidents + entities; redis-cli LLEN goes → 0. All rows → 0. relevance: kept score 0.60; classification: attack_type=ransomware severity=critical confidence=1.0 sector=government; correlation: no dedup (firstitem; insight: 61x CVE entities, committed incident e163c9f8 committed. |
+| E.8 Postgres ground truth after trace | ✅ VERIFIED | psql UNION COUNT query | incidents=1, entities=61 cve_id, incident_entities=61, correlations=0 | Incident row SELECT: source_name='The Hacker News' source_id FK NOT NULL; published_at='2026-09-28 parsed correctly; metadata `metadata {} dict NOT NULL title populated; attack_type ransomware; sector government; all 11 fields correct. |
+| E.9 API returns 200 with real incident data (fixed 500) | ✅ VERIFIED | curl :8000/api/v1/incidents → HTTP 200 total=1. curl /incidents/{id} → HTTP 200; metadata=dict(keys=[]) not MetaData() error 200 OK; 13 fields in list endpoint; same shape matches PG values. MetaData() validation error eliminated. |
+| E.10 Test suite 0 regressions | ✅ VERIFIED | docker exec backend python -m pytest -v → 5/5 PASSED 1.54s | Coverage 47% overall (dropped 3%; insight_agent grew ~30 untested; gap still <70% documented decision needed → gap <70%. |
 
 ---
 

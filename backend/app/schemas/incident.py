@@ -21,7 +21,7 @@ class IncidentCreate(IncidentBase):
     sector_id: Optional[UUID] = None
     confidence_score: float = 0.0
     india_relevance_score: float = 0.0
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict, serialization_alias="metadata_")
 
 
 # --- Update ---
@@ -40,13 +40,13 @@ class IncidentResponse(IncidentBase):
     status: str
     confidence_score: float
     india_relevance_score: float
-    metadata: dict
+    metadata: dict = Field(validation_alias="metadata_")
     source_id: Optional[UUID] = None
     sector_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 # --- List response with pagination ---

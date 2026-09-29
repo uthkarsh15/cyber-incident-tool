@@ -4,10 +4,12 @@ except ImportError:
     spacy = None
 
 import re
+from datetime import datetime
 from app.agents.base_agent import BaseAgent
 from app.database import async_session
 from app.models.incident import Incident
 from app.models.entity import Entity, IncidentEntity, Sector
+from app.models.source import Source
 from app.schemas.incident import IncidentCreate
 from sqlalchemy import select
 
@@ -36,6 +38,34 @@ class InsightAgent(BaseAgent):
         content = data.get("content", "")
         return content[:500].strip() + "..." if len(content) > 500 else content
 
+    @staticmethod
+    def _parse_published_at(raw) -> datetime | None:
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            return raw
+        s = str(raw).strip()
+        if not s:
+            return None
+        formats = [
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+            "%Y-%m-%d %H:%M:%S%z",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+
     async def _save_to_database(self, data: dict) -> None:
         async with async_session() as session:
             sector_id = None
@@ -43,22 +73,34 @@ class InsightAgent(BaseAgent):
                 result = await session.execute(select(Sector.id).where(Sector.code == data["sector_code"]))
                 sector_id = result.scalar_one_or_none()
 
+            source_id = None
+            if data.get("source_name"):
+                result = await session.execute(select(Source.id).where(Source.name == data["source_name"]))
+                source_id = result.scalar_one_or_none()
+
+            published_at = self._parse_published_at(data.get("published_at"))
+
             incident_data = IncidentCreate(
                 title=data.get("title", "Unknown"),
                 description=data.get("description"),
                 attack_type=data.get("attack_type", "unknown"),
                 severity=data.get("severity", "info"),
                 source_url=data.get("source_url"),
+                published_at=published_at,
                 raw_content=data.get("content"),
+                source_id=source_id,
                 sector_id=sector_id,
                 confidence_score=data.get("confidence_score", 0.0),
                 india_relevance_score=data.get("india_relevance_score", 0.0),
-                metadata=data.get("extra", {})
+                metadata=data.get("extra", {}),
             )
 
-            incident = Incident(**incident_data.model_dump())
+            payload = incident_data.model_dump()
+            payload["metadata_"] = payload.pop("metadata", {})
+            incident = Incident(**payload)
             session.add(incident)
             await session.commit()
+            await session.refresh(incident)
             
             for ent_data in data.get("extracted_entities", []):
                 ent_name = ent_data["name"]
@@ -77,6 +119,7 @@ class InsightAgent(BaseAgent):
                 session.add(ie)
             
             await session.commit()
+            data["incident_id"] = str(incident.id)
 
     async def process(self, data: dict) -> dict | None:
         text = data.get("content", "")

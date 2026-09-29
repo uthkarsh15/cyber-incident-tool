@@ -5,7 +5,9 @@ from app.models.incident import Incident
 from app.schemas.incident import IncidentCreate, IncidentUpdate
 
 async def create_incident(db: AsyncSession, data: IncidentCreate) -> Incident:
-    incident = Incident(**data.model_dump())
+    payload = data.model_dump()
+    payload["metadata_"] = payload.pop("metadata", {})
+    incident = Incident(**payload)
     db.add(incident)
     await db.commit()
     await db.refresh(incident)
