@@ -1,5 +1,269 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage G1 — Verification, Cleanup, Regression Tests
+**Date**: 2026-09-30
+**What was verified and how** (raw command output reproduced where practical; every claim below corresponds to an actual command run in this stage):
+
+**Step 0 — Stage F verification (raw output audit):**
+- `git show --stat 77c15c2` raw output:
+```
+commit 77c15c2d21598e12b92c505ceedf53dc03624a8b
+Author: uthkarsh15 <shivamg1505@gmail.com>
+Date:   Wed Sep 30 11:05:29 2026 +0530
+
+    Stage F: scheduled scraper service
+
+ PROGRESS.md                                    |  29 ++-
+ STATUS.md                                      | 118 +++++++++++++
+ backend/app/agents/insight_agent.py            | 115 ++++++------
+ docker-compose.yml                             |  14 ++
+ scraper/scraper/pipelines/incident_pipeline.py |   6 +-
+ scraper/scraper/run_one_spider.py              |  69 ++++++++
+ scraper/scraper/scheduler.py                   | 235 +++++++++++++++++++++++++
+ 7 files changed, 532 insertions(+), 54 deletions(-)
+```
+- 7 committed files detailed (what each is and why it changed; NON-scheduler work FLAGGED):
+  1. `PROGRESS.md` (+29/-1) — Stage F bookkeeping: verification table row added, backlog items logged. **Part of Stage F scope.**
+  2. `STATUS.md` (+118 lines) — Stage F detailed verification writeup (2-cycle proof, 4 runtime bugs fixed, coverage gap note). **Part of Stage F scope.**
+  3. `backend/app/agents/insight_agent.py` (+115/-54) — Imported `IntegrityError` from `sqlalchemy.exc`; added explicit `except IntegrityError` BEFORE generic Exception in `process()` (UNIQUE source_url → INFO "Duplicate skipped", all other IntegrityErrors → ERROR return None); extracted `_persist()` method out of `_save_to_database()` and wrapped with try/rollback/raise so any exception from ORM commits triggers `await session.rollback()`. ⚠️ **FLAGGED AS NOT PART OF SCHEDULER WORK** — these are the "pre-stage 4 WIP edits" (rolled into Stage F commit from Stage E follow-up backlog: IntegrityError + session.rollback handling were Stage E pipeline bugs).
+  4. `docker-compose.yml` (+14 lines) — Added `scraper` compose service block. **Core scheduler work.**
+  5. `scraper/scraper/pipelines/incident_pipeline.py` (+3/-3) — Changed signatures `open_spider(self)` → `open_spider(self, spider)`, `close_spider(self)` → `close_spider(self, spider)`, `process_item(self, item)` → `process_item(self, item, spider)` per Scrapy 2.x contract. ⚠️ **FLAGGED AS NOT PART OF SCHEDULER WORK** — Stage D.8 backlog item ("Scrapy deprecation warnings cleaned") carried over and committed alongside Stage F; not the scheduler itself.
+  6. `scraper/scraper/run_one_spider.py` (+69, NEW) — Subprocess entrypoint: takes `<spider_name>` CLI arg, instantiates single CrawlerProcess via `get_project_settings()`, connects `signals.spider_closed` to capture `finish_reason + crawler.stats.get_stats()`, emits line `STATS_PREFIX SCHEDULER_SPIDER_STATS {...json...}` to stdout. **Core scheduler work (per-spider subprocess wrapper).**
+  7. `scraper/scraper/scheduler.py` (+235, NEW) — Long-running scheduler main loop. Env parsing (`SCRAPER_SPIDERS` default "news" CSV, `SCRAPER_INTERVAL_MINUTES` default 30 clamped ≥1, `SCRAPER_SPIDER_TIMEOUT_SECONDS` default 900 clamped ≥30); per-spider launch via `subprocess.run([sys.executable, run_one_spider.py, name])` with timeout + capture_output + stats JSON parse via STATS_PREFIX line detection; SIGTERM + (non-nt) SIGINT graceful shutdown handler flipping `_running=False`; sleep-in-0.5s-ticks between cycles so signal handler is responsive. **Core scheduler work (the main deliverable).**
+  Summary: 5 files are Stage F scheduler work (PROGRESS/STATUS docs + compose + wrapper + scheduler.py). 2 files are PRE-STAGE "4 WIP edits" from prior stages rolled into the same commit: `insight_agent.py` (Stage E IntegrityError + rollback / 4 logical edits: IntegrityError import + _persist extraction + try/rollback wrapper + except IntegrityError in process) and `incident_pipeline.py` (3 Scrapy signature fixes).
+- `docker compose logs agent_orchestrator 2>&1 | grep -n "Duplicate skipped"` raw output (3 hits):
+```
+agent_orchestrator-1  | 2026-09-30 05:28:04,892 | agent.correlation | INFO | Duplicate skipped:
+https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+agent_orchestrator-1  | 2026-09-30 05:29:07,991 | agent.correlation | INFO | Duplicate skipped:
+https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+agent_orchestrator-1  | 2026-09-30 05:30:03,812 | agent.correlation | INFO | Duplicate skipped:
+https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+```
+  Explanation of the 3 hits:
+  1. All 3 lines are logged by `agent.correlation` (**NOT** insight_agent's IntegrityError handler — they come from CorrelationAgent.process() when its `SELECT incidents.id FROM incidents WHERE source_url = ?` check finds a match and returns None early).
+  2. Timestamps 05:28:04, 05:29:07, 05:30:03 — spaced ~63s / ~56s apart, matching the 1-min SCRAPER_INTERVAL_MINUTES override used in Stage F's 2-cycle proof. Each hit corresponds to one orchestrator BLPOP consumption of the same Weekly Recap URL that had been pushed into `incident:raw` by each scheduler cycle's news_spider run.
+  3. All 3 are for the identical source URL: `...weekly-recap-387m-crypto-hack-citrix.html` (the Stage E single-row trace incident still in the incidents table with id=1). CorrelationAgent correctly deduped 100% of re-enqueued duplicate URLs, and correlation_agent logged them at INFO not ERROR per the orchestrator deduplication contract. No duplicates were ever INSERTed (psql incidents count stayed 1 after Stage F).
+- `docker compose config | grep -A12 "scraper:"` raw output (confirmed env defaults, resolved with `:-` fallbacks):
+```yaml
+scraper:
+  build:
+    context: D:\cyber-incident-tool\scraper
+    dockerfile: Dockerfile
+  command:
+    - python
+    - scraper/scheduler.py
+  depends_on:
+    redis:
+      condition: service_started
+      required: true
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    SCRAPER_INTERVAL_MINUTES: "30"
+    SCRAPER_LOG_LEVEL: INFO
+    SCRAPER_SPIDERS: news
+  networks:
+    default: null
+  restart: unless-stopped
+```
+  NOTE: `SCRAPER_SPIDER_TIMEOUT_SECONDS` is NOT set via compose env; it defaults in scheduler.py code to `DEFAULT_SPIDER_TIMEOUT_SECONDS = 900`. 4 env vars present via compose. `restart: unless-stopped` is set. depends_on redis service_started (not healthy).
+- `docker ps` raw output (what is running):
+```
+CONTAINER ID   IMAGE                                    COMMAND                  CREATED          STATUS                  PORTS
+803ac90bca02   cyber-incident-tool-backend              "sh -c 'alembic upgr…"   16 minutes ago   Up 16 minutes           0.0.0.0:8000->8000/tcp
+d10f24b67041   cyber-incident-tool-agent_orchestrator   "python -c 'import a…"   2 hours ago      Up 2 hours
+a24dbaaf7627   cyber-incident-tool-dashboard            "streamlit run app.p…"   24 hours ago     Up 24 hours             0.0.0.0:8501->8501/tcp
+36d0de674d72   postgres:15-alpine                       "docker-entrypoint.s…"   24 hours ago     Up 24 hours (healthy)   0.0.0.0:5432->5432/tcp
+b078a5ff9ed3   redis:7-alpine                           "docker-entrypoint.s…"   24 hours ago     Up 24 hours             0.0.0.0:6379->6379/tcp
+```
+  5 containers running: backend, agent_orchestrator, dashboard, db (healthy), redis.
+  **Scraper service is currently STOPPED / not running** — no `cyber-incident-tool-scraper-1` container appears in the list. Scraper was stopped at end of Stage F after the 2-cycle proof and remains stopped.
+
+**Step 1 — Cleanup root tests/ directory:**
+- `Get-ChildItem -Path tests -Recurse -File -ErrorAction SilentlyContinue` → 0 files, empty output.
+- Existence check: `Test-Path tests` → `False`.
+- Explanation: The repo-root duplicate `tests/` directory was **already deleted in Stage D** (committed as 4 file deletions: `tests/conftest.py, tests/evaluate.py, tests/test_agents.py, tests/test_api.py` per Stage D.10). Nothing to delete in Stage G1; the root tests/ directory does not exist.
+- Confirmation that `backend/tests` is the only test tree pytest collects:
+  - `Test-Path backend/tests` → `True`. Contents (real .py files): `conftest.py`, `evaluate.py`, `test_agents.py`, `test_api.py`, `__init__.py`, plus 3 uncommitted WIP files: `scraper_scheduler.py`, `test_regressions_stage_e.py`, `test_scheduler_and_services.py`.
+  - `conftest.py` in backend/tests prepends `BACKEND_DIR (= d:\cyber-incident-tool\backend)` plus `ROOT_DIR` to `sys.path`; no pyproject.toml / pytest.ini / setup.cfg exists anywhere in the repo (Glob found 0 each for all three), so pytest uses default discovery and collects `test_*.py` starting from the invocation working directory `/app` inside the backend container — which maps exactly to `backend/tests/` via the COPY instruction in backend/Dockerfile (PYTHONPATH=/app, WORKDIR=/app, COPY . . so the `tests/` subdir visible at `/app/tests/` is in-repo `backend/tests/`).
+  - pytest `--collect-only` result: 55 tests collected, ALL under `tests/...` (i.e., backend/tests). No other test directory collected.
+  - **Conclusion: backend/tests is the sole pytest-collected test tree.**
+
+**Step 2 — Baseline pytest with coverage (before stage group-by-stage runs):**
+Command: `docker exec cyber-incident-tool-backend-1 python -m pytest --cov=app --cov-report=term-missing`
+Raw per-file baseline coverage table (the 3 uncommitted test files already exist and are collected via volume mount; this is the true current-state baseline):
+```
+Name                                 Stmts   Miss  Cover   Missing
+------------------------------------------------------------------
+app/__init__.py                          0      0   100%
+app/agents/__init__.py                   0      0   100%
+app/agents/base_agent.py                26     10    62%   21, 25-33
+app/agents/classification_agent.py      28      0   100%
+app/agents/correlation_agent.py         52     23    56%   23-29, 32-37, 45-47, 51-62
+app/agents/insight_agent.py            116     17    85%   22-25, 30-36, 47, 81-82, 137-140, 165, 167-169
+app/agents/orchestrator.py              40     10    75%   40-49
+app/agents/relevance_agent.py           27      0   100%
+app/agents/scraper_agent.py              0      0   100%
+app/agents/visualization_agent.py        0      0   100%
+app/api/__init__.py                      0      0   100%
+app/api/feed.py                         12      3    75%   10, 14-15
+app/api/incidents.py                    33     12    64%   35-38, 42, 46-49, 53-55
+app/api/sources.py                      18      7    61%   12-13, 17-21
+app/api/stats.py                        23     12    48%   12-23, 32-41
+app/config.py                           13      0   100%
+app/database.py                         17      5    71%   17-22
+app/main.py                             21      2    90%   9-10
+app/models/__init__.py                   3      0   100%
+app/models/entity.py                    37      0   100%
+app/models/incident.py                  28      0   100%
+app/models/source.py                    18      0   100%
+app/schemas/__init__.py                  2      0   100%
+app/schemas/incident.py                 41      0   100%
+app/schemas/source.py                   18      0   100%
+app/services/__init__.py                 0      0   100%
+app/services/feed_service.py            20      0   100%
+app/services/incident_service.py        40      1    98%   28
+app/utils/__init__.py                    0      0   100%
+app/utils/seed.py                       21     21     0%   1-60
+------------------------------------------------------------------
+TOTAL                                  654    123    81%
+======================== 54 passed, 1 xfailed in 1.71s =========================
+```
+55 tests collected at baseline (5 tests from Stage C + 50 new uncommitted group-3 tests already on disk). 81% already — above 70% PROJECT_RULES §8 threshold.
+
+**Step 3a — Regression tests for the three Stage E bugs (pytest run after group):**
+Command: `docker exec ... python -m pytest -v tests/test_regressions_stage_e.py -k "parse_published_at or (incident_response and metadata) or incident_response_from_attributes or source_id_lookup"`
+Raw result: **10 passed, 13 deselected in 0.57s.**
+Specifically:
+1. `InsightAgent._parse_published_at` — 6 tests passed:
+   - "Sep 28, 2026" (month-name format) → parsed to datetime(2026,9,28) ✓
+   - "2026-09-28" (ISO date) → datetime(2026,9,28) ✓
+   - "2026-09-28T13:45:00+00:00" (ISO datetime with tz) → year/month/day/hour/minute correct ✓
+   - `None` input → returns `None` ✓
+   - `""` / `"    "` empty/whitespace → returns `None` ✓
+   - Garbage ("not a date at all 42" / "!!!@@@###" / "31/02/2026") → returns None, **does not raise** ✓
+2. `IncidentResponse` schema metadata serialization — 2 tests passed:
+   - Direct construction with `metadata_={tags:[CVE-2026-0001], entities:[RBI]}` → `model_dump()` contains key `"metadata"` (dict value correct), key `"metadata_"` absent ✓ (MetaData() clash bug regression)
+   - `IncidentResponse.model_validate(FakeORM())` where FakeORM has attribute `.metadata_ = {"foo":"bar"}` (no `.metadata` attribute) → `model_dump()["metadata"] == {"foo":"bar"}` ✓ (the ORM from_attributes / populate_by_name path that was the 2nd half of Stage E's HTTP 500)
+3. `source_id` lookup by source_name in insight_agent — 2 tests passed:
+   - Known source "The Hacker News": mocked session.execute returns fake UUID for FROM sources query → captured Incident ORM constructor kwargs include `.source_id = that_fake_uuid` ✓ (Stage E Bug 2 regression)
+   - Unknown source "Totally Unknown Source": mocked execute returns None → constructed Incident has `.source_id is None` ✓ (negative path)
+
+**Step 3b — Unit tests for ClassificationAgent, CorrelationAgent, InsightAgent (CVE/entity ext), orchestrator flow + Weekly Recap roundup fixture documented (pytest run after group):**
+Command: `docker exec ... python -m pytest -v tests/test_regressions_stage_e.py -k "not (parse_published_at or source_id_lookup or incident_response or metadata_from_attributes or metadata_serializes)"`
+Raw result: **12 passed, 10 deselected, 1 xfailed in 0.61s.**
+Specifically:
+- **ClassificationAgent** — 5 tests:
+  1. Ransomware keywords: attack_type=ransomware, severity=critical, confidence_score>0 ✓
+  2. Phishing keywords: attack_type=phishing, sector_code=banking_finance ✓
+  3. Zero keywords default: attack_type=unknown, severity=info, sector_code=None, confidence=0.0 ✓
+  4. **XFAIL** `test_classification_agent_weekly_recap_roundup_fixture` — reason documented in xfail marker: `"Known limitation: Weekly Recap aggregate inherits worst-included attack_type=ransomware severity=critical sector=government; roundup taxonomy not yet implemented (Stage F backlog item)."` → xfailed, not counted as failure ✓ (known-limitation documented per instruction; no classifier behaviour changed)
+  5. `test_classification_agent_weekly_recap_record_current_output` — non-xfailing twin test hard-asserts CURRENT REAL output of classifier against the ROUNDUP_FIXTURE Weekly Recap article: `attack_type=="ransomware"` (from BlackCat ransomware + ransom attack keyword hits), `severity=="critical"` (from actively-exploited family), `sector_code=="government"` (from government department hit), `confidence_score > 0.0` ✓ (records current output as baseline so any classifier behaviour change in future stages immediately fails this test; no classifier code modified this stage)
+- **CorrelationAgent** — 2 tests:
+  1. Duplicate source_url → mock session SELECT returns an existing incident id → `process()` returns `None` (dedup path) ✓
+  2. New source_url → mock SELECT returns None → `process()` returns the input dict augmented with `"correlations"` key (pass-through path) ✓
+- **InsightAgent entity/CVE extraction** — 3 tests:
+  1. Content with 3 CVEs (CVE-2026-9999 / -1111 / -1234) + 2 IPs → `extracted_entities` contains all 3 CVEs lowercased plus exactly 2 entity_type=ip_address entries; `description` summary field populated ✓
+  2. Content with zero matches → `extracted_entities == []` ✓
+  3. `IntegrityError` handling: (a) direct `_save_to_database()` call raises IntegrityError on commit → `await session.rollback()` fires then IntegrityError is re-raised (rollback.await_count >= 1); (b) `process()` level catches the re-raised UNIQUE source_url IntegrityError specifically → returns `None` without raising, rollback >= 1 ✓
+- **Orchestrator flow** (no network, no real Redis — all mocked via `_build_mocked_orchestrator()` factory that swaps `redis.from_url` class + each agent's `.process` to AsyncMock) — 3 tests:
+  1. relevance returns None (India score < 0.40 dropped) → classification/correlation/insight .assert_not_called() ✓ (short-circuit at stage 1)
+  2. relevance keeps → classification tags → correlation returns None (dedup hit) → insight .assert_not_called() ✓ (short-circuit at stage 3)
+  3. Happy path: all 4 agents called in correct order relevance→classification→correlation→insight; returned result equals the staged insight return value ✓ (full pipeline ordering)
+
+**Step 3c — Scheduler tests: interval/spider env parsing + one spider failing does not stop loop (mock subprocess.run) (pytest run after group):**
+Command: `docker exec ... python -m pytest -v tests/test_scheduler_and_services.py -k "get_spider_list or get_interval or get_spider_timeout or parse_stats or run_one_spider or run_spiders or main_loop"`
+Raw result: **16 passed, 11 deselected in 0.39s.**
+Specifically:
+- **Env parsing** (7 tests):
+  - `_get_spider_list()`: default → ["news"]; CSV "news, certin, , github " (trim + skip blanks) → ["news","certin","github"] ✓
+  - `_get_interval_minutes()`: unset→30 (PROJECT_RULES.md §5.1); env="15"→15; invalid→falls back to 30; "0" or "-10" clamped to 1 (no zero-interval hot loop) ✓
+  - `_get_spider_timeout()`: unset→900s (15m default from scheduler.py line 13); "5" clamped to min 30s; "abc" garbage→900 ✓
+- **STATS_PREFIX line parse** (3 tests):
+  - Valid JSON line with prefix → parsed dict {"spider":"news","items_scraped":16,...} ✓
+  - No prefix → None ✓
+  - Prefix present, JSON malformed → None (no raise) ✓
+- **subprocess.run isolation (mocked)** (4 tests):
+  - TimeoutExpired raised → result finish_reason="timeout", error_count=1, items=0 ✓
+  - OSError / python missing → finish_reason="launch_error", error_count=1 ✓
+  - exitcode=1 with no stats JSON in output → finish_reason="crashed", error_count=1, exit_code=1, items=0 ✓
+  - exitcode=0 with valid stats line in stdout → items_scraped=16, finish_reason="finished", error_count=0, response_count=20 ✓
+- **"one spider failing does not stop the loop" isolation** (1 test — `test_run_spiders_one_spider_fails_does_not_affect_siblings`):
+  - Patched `_run_one_spider` = side_effect log ["good1 result items=5", RuntimeError("spider imploded"), "good2 result items=5"] for input list ["good1","broken","good2"]
+  - `run_spiders()` completes WITHOUT raising RuntimeError out; returned per_spider dict has all 3 keys present ✓
+  - good1: items=5, error_count=0; broken: error_count=1, finish_reason="setup_error"; good2: items=5, error_count=0 ✓ (siblings ran successfully AFTER the middle spider threw; error isolation works)
+- **Scheduler main loop 2 cycles then graceful SIGTERM-style exit** (1 test `test_main_loop_runs_two_cycles_then_sigterm_exits`):
+  - Patches time.time/sleep with staged clock, signal.signal (no-op), _get_interval_minutes=1, _get_spider_list=["news"], run_spiders side_effect flips scheduler._running=False after 2nd iteration
+  - scheduler.main() runs 2 full cycles then exits cleanly; iteration.count == 2 ✓; no leftover subprocesses (no real subprocess launched — all mocked)
+
+**Step 4 — Final full-suite coverage run (target ≥70% PROJECT_RULES §8):**
+Command: `docker exec cyber-incident-tool-backend-1 python -m pytest -v --cov=app --cov-report=term-missing`
+Raw final coverage table — identical to Step 2 baseline because all pre-existing tests ran identically and passed:
+```
+Name                                 Stmts   Miss  Cover   Missing
+------------------------------------------------------------------
+app/__init__.py                          0      0   100%
+app/agents/__init__.py                   0      0   100%
+app/agents/base_agent.py                26     10    62%   21, 25-33
+app/agents/classification_agent.py      28      0   100%
+app/agents/correlation_agent.py         52     23    56%   23-29, 32-37, 45-47, 51-62
+app/agents/insight_agent.py            116     17    85%   22-25, 30-36, 47, 81-82, 137-140, 165, 167-169
+app/agents/orchestrator.py              40     10    75%   40-49
+app/agents/relevance_agent.py           27      0   100%
+app/agents/scraper_agent.py              0      0   100%
+app/agents/visualization_agent.py        0      0   100%
+app/api/__init__.py                      0      0   100%
+app/api/feed.py                         12      3    75%   10, 14-15
+app/api/incidents.py                    33     12    64%   35-38, 42, 46-49, 53-55
+app/api/sources.py                      18      7    61%   12-13, 17-21
+app/api/stats.py                        23     12    48%   12-23, 32-41
+app/config.py                           13      0   100%
+app/database.py                         17      5    71%   17-22
+app/main.py                             21      2    90%   9-10
+app/models/__init__.py                   3      0   100%
+app/models/entity.py                    37      0   100%
+app/models/incident.py                  28      0   100%
+app/models/source.py                    18      0   100%
+app/schemas/__init__.py                  2      0   100%
+app/schemas/incident.py                 41      0   100%
+app/schemas/source.py                   18      0   100%
+app/services/__init__.py                 0      0   100%
+app/services/feed_service.py            20      0   100%
+app/services/incident_service.py        40      1    98%   28
+app/utils/__init__.py                    0      0   100%
+app/utils/seed.py                       21     21     0%   1-60
+------------------------------------------------------------------
+TOTAL                                  654    123    81%
+======================== 54 passed, 1 xfailed in 2.41s =========================
+```
+Coverage result: **OVERALL 81% (654 stmts, 123 miss)** — **70% PROJECT_RULES.md §8 requirement MET and EXCEEDED.**
+Full suite breakdown: 54 passed, 1 xfailed (the known-limitation Weekly Recap taxonomy placeholder xfail). No real test failures.
+Modules with remaining MEANINGFUL coverage gaps (stopping here per rule — no assertion-free tests written to inflate further from 81%):
+- `app/utils/seed.py` 0% (21 stmts) — needs real Postgres + alembic-applied schema; SQLite in-memory doesn't exercise the asyncpg/UUID serial PK paths.
+- `app/api/stats.py` 48% (12 miss: lines 12–23 overview join + 32–41 trends query) — needs a populated incident/sector DB to exercise the aggregation SQL.
+- `app/agents/correlation_agent.py` 56% (23 miss: lines 23–62 — Jaccard similarity + recent-incidents time-window correlation grouping) — needs multiple real incident rows to run dedup beyond the simple single-URL SELECT path.
+- `app/api/sources.py` 61% (7 miss: POST/PATCH/DELETE source routes) — needs TestClient integration test.
+- `app/api/incidents.py` 64% (12 miss: POST create, PATCH update, DELETE delete routes) — needs TestClient integration test.
+- `app/agents/base_agent.py` 62% (10 miss: batch_process method) — not used by orchestrator single-item flow.
+- `app/agents/insight_agent.py` 85% (17 miss — small branches around spaCy import fallback + description truncation logic)
+
+**Step 5 — Files changed / tracked in Stage G1 commit (see bottom of this file for `git show --stat HEAD` + `git status --short`):**
+1. New file: `backend/tests/scraper_scheduler.py` — Verbatim copy of `scraper/scraper/scheduler.py` placed at `backend/tests/scraper_scheduler.py` so backend-image pytest (which doesn't install Scrapy / can't import scraper package) can import the pure-Python scheduler helpers via sys.path prepend in `test_scheduler_and_services.py`. No Scrapy calls needed for scheduler tests — they all mock subprocess.run.
+2. New file: `backend/tests/test_regressions_stage_e.py` — 23 tests total: 10 regression tests for the 3 Stage E bugs (group 3a) + 13 agent/orchestrator unit tests (group 3b) including the Weekly Recap xfail + record-current-output twin test.
+3. New file: `backend/tests/test_scheduler_and_services.py` — 27 tests total: 16 scheduler env/parse/subprocess/error-isolation/main-loop tests (group 3c) plus 7 incident_service CRUD tests plus 4 feed_service JSON/RSS tests.
+4. Modified: `STATUS.md` — this corrected Stage G1 entry added on top of the verified stages below.
+5. Modified: `PROGRESS.md` — (a) new Stage G1 verification table between Stage F and Stage E; (b) Known Issues & Blockers table rows updated: "Regression tests: _parse_published_at() and metadata schema round-trip" → High / Closed (done in Stage G1); "Test coverage < 70% PROJECT_RULES.md §8" → High / Closed (81% actual, target met and exceeded).
+
+Backlog items still OPEN (carried forward from Stage F; deliberately NOT addressed in Stage G1 per instruction — Stage G1 is verification + tests only; dashboard untouched this stage):
+- **certin Playwright integration**: client-side JS-expanded listing rows; still needs a dedicated stage.
+- **github_spider.py missing**: never written; PROJECT_RULES §3 expects it.
+- **Redis seen-URL prefilter**: save agent cycles on re-scraped URLs before correlation_agent even runs.
+- **Weekly Recap misclassification**: xfail test exists; taxonomy fix (type=roundup/meta, severity=worst-of) is backlogged, not modified in G1.
+- **Hardcoded confidence_score=1.0**: ClassificationAgent still emits 1.0 regardless of rule-match density.
+- Meaningful coverage gaps (seed.py 0%, stats.py 48%, correlation_agent 56%, routes 61-64%, base_agent 62%, insight_agent 85%): 81% overall exceeds 70% target; gaps deferred to a dedicated integration-test stage with SQLite test DB + FastAPI TestClient.
+
+---
+
 ## Stage F — Scheduled Scraper Service (Two-Cycle Proof)
 **Date**: 2026-09-30
 **What was verified and how**:
