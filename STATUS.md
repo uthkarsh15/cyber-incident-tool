@@ -1,5 +1,53 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage G1.1 — Scheduler tests target REAL scraper/scraper/scheduler.py (no copy in tests)
+**Date**: 2026-09-30
+
+**G1.1 Step 1 — insight_agent.py (Stage F) behavioral changes audit**
+Full diff `git diff fc74a9c 77c15c2 -- backend/app/agents/insight_agent.py` shows these behavioural changes:
+1. `+from sqlalchemy.exc import IntegrityError` (import).
+2. `_save_to_database()` now wraps its original body inside `try: await self._persist(session, data) except Exception: await session.rollback(); raise` → **session.rollback() is now guaranteed to run on ANY exception from the DB persistence path, not just ad-hoc fallout.** This goes BEYOND the basic IntegrityError catch; this is the most important behavioural addition that wasn't in the Stage E code.
+3. Entire persistence body (sector_id lookup / source_id lookup / published_at parse / IncidentCreate + Incident construction / entity extraction insertions) moved verbatim unchanged into new `async def _persist(self, session, data)` extracted method`. No functional change to the SQL statements themselves; purely structural refactor to enable the try/rollback/raise wrapper above.
+4. New explicit `except IntegrityError as e` block added BEFORE the existing generic except Exception block inside `process()`. Behaviour:
+   - If str(e).lower() matches "unique" AND also contains ("source_url" OR "duplicate") → `logger.info(f"Duplicate skipped: {source_url}")` return None.
+   - Any other IntegrityError → `logger.error(f"Integrity error saving incident: {e}")` return None.
+   - Previously, all IntegrityErrors were indistinguishable from any other Exception and all logged ERROR.
+**Changes that go beyond the IntegrityError catch** : `await session.rollback()` is the largest: session.close() call it.rollback() fires for _persist(). run_spiders() → this is the big one beyond IntegrityError; rollback was not previously called at all on errors before the new try/except Exception wrapper. Also, extracted `_persist()` as its own method is a structural beyond-IntegrityError refactor.
+
+**G1.1 Step 2 — root tests/ discrepancy explanation:**
+```
+git log --oneline --stat -- tests | head -20
+09730c0 stage D: news_spider runs 16 real items [...]; delete duplicate repo-root tests/
+ tests/conftest.py    | 10 ----------
+ tests/evaluate.py    | 14 --------------
+ tests/test_agents.py | 26 --------------------------
+ tests/test_api.py    | 33 ---------------------------------
+ 4 files changed, 83 deletions(-)
+b25ae40 stage C: pytest runs clean inside backend container 5/5 PASSED [...]
+ tests/test_agents.py | 2 +-
+8ede738 first commit
+ tests/conftest.py    | 10 ++++++++++
+ tests/evaluate.py    | 14 ++++++++++++++
+ tests/test_agents.py | 26 ++++++++++++++++++++++++++
+ tests/test_api.py    | 33 +++++++++++++++++++++++++++++++++
+ 4 files changed, 83 insertions(+)
+```
+`ls -d tests 2>&1` → `tests/ directory DOES NOT EXIST at repo root`. `git ls-files tests` → empty output.
+**Discrepancy: Stage F PROGRESS.md row F.0 said root tests/ "still exists" (written 2026-09-30 Stage G1 verification table entry written before Stage F commit existed — it was actually an incorrect stale claim that was never corrected until G1.1 — actual state: 09730c0 Stage D actually deleted all 4 tracked files from tests/ directory, the empty dir was never committed empty untracked __pycache__ junk that git doesn't track empty dirs so the stale directory tree is gone entirely. (Only dir 0 tracked 0 exists.
+
+**G1.1 Step 3 — `backend/tests/scraper_scheduler.py DELETED:**
+`backend/tests/scraper_scheduler.py (verbatim copy of scraper/scraper/scheduler.py) deleted. 0 production code copies inside tests/.
+
+**G1.1 Step 4 — Approach chosen: (a) move tests to scraper/tests/test_scheduler.py run in scraper image.** Why**: Pytest installed ad-hoc (pip install pytest pytest-cov inside a one-off docker run container, NOT added to NOT saved to image (not requirements.txt, so does NOT bloat runtime shipped image). Scheduler.py has ZERO scrapy imports (only stdlib), all calls to run_one_spider.py is only ever subprocess, all mocked in tests. 16/16 PASSED. Only backend/tests/test_scheduler_and_services.py no longer imports any scheduler module → contains only incident_service (7 tests) + feed_service tests.
+
+**G1.1 Step 5 — Real code proof (scheduler.py DEFAULT_INTERVAL_MINUTES real temporarily to 99: test_get_interval_minutes_default + test_get_interval_minutes_invalid_falls_back_to_default FAILED assert 99 == 30. Reverted `git checkout -- scraper/scraper/scheduler.py`, git diff 0 differences, all 16/16 pass again.
+
+**G1.1 Step 6 — Coverage real scheduler.py = 95% (132 stmts / 7 miss) run_one_spider = 0% coverage/was not imported at all. run_one_spider module is only ever launched via subprocess (via. coverage does not trace subprocess children. No test code inside a subprocess, coverage.py does not trace children by default without coverage run_one_spider.
+
+**G1.1 Step 7 — backend suite unchanged: collect 55 tests; run 54 passed, 1 xfailed in 1.39s, 81% (654 stmts/123 miss). Dashboard 0 diffs coverage vs G1.
+
+---
+
 ## Stage G1 — Verification, Cleanup, Regression Tests
 **Date**: 2026-09-30
 **What was verified and how** (raw command output reproduced where practical; every claim below corresponds to an actual command run in this stage):
