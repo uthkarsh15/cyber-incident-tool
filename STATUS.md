@@ -1,5 +1,123 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## Stage F — Scheduled Scraper Service (Two-Cycle Proof)
+**Date**: 2026-09-30
+**What was verified and how**:
+
+**Pre-flight audit (before any changes):
+- `git status --short` → `M backend/app/agents/insight_agent.py`, `M docker-compose.yml`, `?? scraper/scraper/scheduler.py`, `?? scraper/scraper/run_one_spider.py` (scheduler & wrapper were new WIP from prior session; insight_agent & compose already had pre-existing edits).
+- `git show --stat fc74a9c` → 5 files, 178 insertions, 7 deletions (Stage E commit).
+- `ls tests/` (repo-root) → only `__pycache__/` exists → root duplicate tests/ directory **STILL EXISTS** (no content, not deleted in this stage per instruction).
+- PROJECT_RULES.md scrape interval line (quoted exact):
+  > `SCRAPER_INTERVAL_MINUTES=30`
+  > — PROJECT_RULES.md §5.1 **Required Environment Variables**
+- psql baseline: incidents=1, entities=61, incident_entities=61, correlations=0 (remaining from Stage E single-item trace).
+- redis-cli `LLEN incident:raw` → **0** (queue empty at start).
+
+**Step 1 — Reactor check (scheduler.py + run_one_spider.py):
+- Code analysis: scheduler.py never instantiates `CrawlerProcess` in the main process. The `_run_one_spider()` function at line 64 uses `subprocess.run([sys.executable, wrapper, name], capture_output=True, text=True, timeout=..., env=env, cwd=...)` to launch each spider inside its own fresh Python subprocess per cycle. `run_one_spider.py` (inside the subprocess) creates exactly one `CrawlerProcess`, runs it, then the process exits.
+- Conclusion: **NOT affected by ReactorNotRestartable**. Each spider on each cycle runs in a brand-new Python process with its own Twisted reactor. No code changes required. (Fixes made instead for two runtime bugs found in step 3 / first test run.)
+
+**Step 2 — insight_agent IntegrityError → session.rollback() present:
+- Code in [backend/app/agents/insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py#L69-L75):
+  ```python
+  async def _save_to_database(self, data: dict) -> None:
+      async with async_session() as session:
+          try:
+              await self._persist(session, data)
+          except Exception:
+              await session.rollback()
+              raise
+  ```
+  `session.rollback()` is called (with await) on ANY exception from `_persist`, including `IntegrityError`. Rollback path confirmed present.
+- Enhancement for PASS criteria: Added explicit `IntegrityError` catch **before** the generic Exception handler in `process()` (lines 160-166) so that `IntegrityError` from `source_url` UNIQUE constraint violation is logged as `INFO "Duplicate skipped: <url>"` instead of ERROR, matching the orchestrator contract. Any other IntegrityError (not unique/source_url/duplicate) still logs ERROR. Generic Exception still logs ERROR.
+
+**Step 3 — Build + runtime fixes:**
+- `docker compose build scraper agent_orchestrator` → both built successfully (exit 0).
+- Runtime bug 1 found on first scraper launch: `run_one_spider.py` line 46 captured `crawler.stats` as a default function argument (`def _on_closed(..., stats_collector=crawler.stats): ...`), which is evaluated at callback-definition time before the crawl starts → Scrapy raises `RuntimeError: Crawler.stats is not set yet`. Fix: remove default-arg capture; access `crawler.stats` inside the callback body via closure at `spider_closed` fire time, which is post-start when stats is ready.
+- Runtime bug 2: `scraper/scraper/pipelines/incident_pipeline.py` had Scrapy method signatures without the required `spider` argument (`open_spider(self)`, `close_spider(self)`, `process_item(self, item)`) → would throw TypeError on next Scrapy 2.x version bump; corrected signatures to `open_spider(self, spider)` / `close_spider(self, spider)` / `process_item(self, item, spider)`.
+- Dockerfile: no edits needed (`FROM python:3.11-slim`, `WORKDIR /app`, `COPY requirements.txt`, `COPY . .` correct; `command: python scraper/scheduler.py` in compose resolves correctly to `/app/scraper/scheduler.py` because compose context is `./scraper` → COPY copies the scraper project root (which contains nested `scraper/` package) to `/app`).
+
+**Step 4 — Two-cycle live test (SCRAPER_INTERVAL_MINUTES=1):
+Override env (shell only, .env untouched): `$env:SCRAPER_INTERVAL_MINUTES=1 ; docker compose up -d scraper`.
+
+**Cycle 1 raw evidence (scraper logs):
+```
+2026-09-30 05:27:54,424 | scraper_scheduler | INFO | scheduler_started spiders=news interval_min=1 ...
+2026-09-30 05:27:54,424 | scraper_scheduler | INFO | run=20260930T052754Z action=start spiders=news
+2026-09-30 05:27:54,424 | scraper_scheduler | INFO | spider=news action=launch
+2026-09-30 05:28:37,730 | scraper_scheduler | INFO | run=20260930T052754Z spider=news items_scraped=16 finish_reason=finished errors=0 exit_code=0
+2026-09-30 05:28:37,734 | scraper_scheduler | INFO | run=20260930T052754Z action=end total_items=16 duration_sec=43.3 failed=none
+```
+→ **items_scraped=16 > 0, errors=0 ✓**
+
+**Cycle 2 raw evidence (scraper logs):
+```
+2026-09-30 05:28:54,742 | scraper_scheduler | INFO | run=20260930T052854Z action=start spiders=news
+2026-09-30 05:28:54,743 | scraper_scheduler | INFO | spider=news action=launch
+2026-09-30 05:29:44,187 | scraper_scheduler | INFO | run=20260930T052854Z spider=news items_scraped=16 finish_reason=finished errors=0 exit_code=0
+2026-09-30 05:29:44,190 | scraper_scheduler | INFO | run=20260930T052854Z action=end total_items=16 duration_sec=49.4 failed=none
+```
+→ **items_scraped=16 > 0, errors=0 ✓** (second subprocess launched correctly → no ReactorNotRestartable, proof of subprocess isolation across cycles)
+
+**Redis LLEN audit (before/after each cycle)
+- Before cycle 1 (baseline): `LLEN incident:raw = 0`
+- After cycle 1 (immediately post-cycle-end, after orchestrator BLPOP drain): `LLEN incident:raw = 0`
+- After cycle 2 (ditto): `LLEN incident:raw = 0`
+
+**Orchestrator logs (tail 100 after both cycles):
+```
+agent_orchestrator-1  | 2026-09-30 05:28:04,892 | agent.correlation | INFO | Duplicate skipped: https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+agent_orchestrator-1  | 2026-09-30 05:29:07,991 | agent.correlation | INFO | Duplicate skipped: https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+agent_orchestrator-1  | 2026-09-30 05:30:03,812 | agent.correlation | INFO | Duplicate skipped: https://thehackernews.com/2026/09/weekly-recap-387m-crypto-hack-citrix.html
+```
+- Duplicate detection correctly runs in correlation_agent (stage 3 of 4) via `SELECT incidents.id FROM incidents WHERE source_url = %s` check → returns `INFO "Duplicate skipped"` (as expected, no ERROR).
+- Orchestrator ERROR grep: `docker compose logs agent_orchestrator | Select-String -Pattern "ERROR" -CaseSensitive` → **0 matches / ERRORS_FOUND_COUNT=0** ✓
+
+**psql counts audit (before cycle 1 vs after cycle 2):
+```
+BEFORE (baseline from Stage E):        AFTER 2 full cycles:
+incidents        | 1                  incidents        | 1     ← 0 new rows added (cycle 1: all 16 non-weekly-recap articles fell below India relevance threshold 0.40 → dropped by relevance_agent before DB write; cycle 2 identical URLs would be deduped anyway by correlation_agent UNIQUE check → no duplicates ever inserted) ✓
+entities         | 61                 entities         | 61    (same CVE entities from Stage E incident)
+incident_entities| 61                 incident_entities| 61
+correlations     | 0                  correlations     | 0
+```
+→ **Cycle 2 adds ZERO duplicate incident rows (incidents stayed 1 → 1) ✓**. Any future new incidents from passes through the relevance filter will be legitimately new URLs that pass both correlation_agent's source_url check and the DB UNIQUE constraint.
+
+**All 4 PASS criteria explicitly met:
+1. Cycle 1: items_scraped=16 > 0 AND errors=0 ✓
+2. Cycle 2: items_scraped=16 > 0 AND errors=0 ✓
+3. Cycle 2 adds no duplicate incident rows (incidents count 1 → 1 unchanged) ✓
+4. Orchestrator shows no ERROR lines (0 ERROR matches; INFO "Duplicate skipped" lines present, as allowed) ✓
+5. New incidents, if any, are legitimately new URLs ✓ (0 new incidents, vacuously true)
+
+**Step 5 — Scraper stopped: `docker compose stop scraper` → Container Stopped.
+Shipped default interval decision:
+- VALUE CHOSEN: **30 minutes**.
+- WHY: Explicitly required by [PROJECT_RULES.md](file:///d:/cyber-incident-tool/PROJECT_RULES.md#L225) §5.1 Required Environment Variables, which quotes `SCRAPER_INTERVAL_MINUTES=30` as the canonical default. Prior value (360 minutes = 6 hours) in scheduler.py and docker-compose.yml was a stale placeholder written before PROJECT_RULES was consulted; both are now corrected to 30. The 30m value balances:
+  - Ethical rate limiting (PROJECT_RULES §7: DOWNLOAD_DELAY=2s already enforced per request; 30m interval is a reasonable re-scrape cadence for news sites that publish ~10-20 stories per day).
+  - End-user freshness for India-relevant threat intel feed.
+
+Backlog items carried forward (not addressed in this stage — requires dedicated stages):
+- **certin Playwright**: CERT-In advisory listing is client-side JS-expanded; static Scrapy cannot enumerate advisory detail URLs; need Playwright-based listing navigator or JS `callSearch()` POST emulation.
+- **github_spider**: File missing entirely from the repo (PROJECT_RULES §3 expects it; never written); need to write the GitHub security advisory / OSINT spider.
+- **Redis seen-URL prefilter**: Currently every scraped URL travels through all 4 agents before the correlation_agent's DB SELECT-based dedup runs; a Redis `SET` bloom/seen-key prefilter in `incident_pipeline.py` (or orchestrator's BLPOP handler) would avoid wasting agent compute cycles on re-scraped duplicate URLs entirely.
+- **Missing regression tests** for (a) `InsightAgent._parse_published_at()` multi-format date parsing (+ edge cases: None, "", junk, ISO variants, month-name formats) and (b) Incident schema metadata serialization (ORM `metadata_` ↔ schema `metadata` round-trip with Pydantic populate_by_name / aliases — the Stage E bug that produced HTTP 500).
+- **Weekly Recap misclassification**: The single kept India-relevant article is a roundup "⚡ Weekly Recap: $387M Crypto Hack..." and was classified attack_type=ransomware, severity=critical, sector=government. The aggregate roundup article inherits the most-severe contents, but as a pure feed aggregation item may deserve a separate classification taxonomy (type=roundup/meta, severity based on worst-included-incident, not automatically critical).
+- **Hardcoded confidence=1.0**: ClassificationAgent currently emits `confidence_score=1.0` for every classified incident regardless of signal strength. Per DATA_MODELS.md, confidence_score should reflect classifier certainty; need a confidence metric tied to number of matched rule keywords vs fallback rules.
+
+**What changed (Stage F code edits):
+1. New file: [scraper/scraper/scheduler.py](file:///d:/cyber-incident-tool/scraper/scraper/scheduler.py) — Long-running scheduler service. Keeps: env-configurable spiders, interval, timeout, log level; error isolation (per-spider subprocess catch-all returns structured stats); structured JSON stats line via STATS_PREFIX; SIGTERM/SIGINT handler for graceful shutdown after current cycle. Subprocess-per-spider-per-cycle architecture eliminates ReactorNotRestartable risk across cycles.
+2. New file: [scraper/scraper/run_one_spider.py](file:///d:/cyber-incident-tool/scraper/scraper/run_one_spider.py) — Subprocess entrypoint for one spider. Builds CrawlerProcess, installs a spider_closed signal handler, emits a single `SCHEDULER_SPIDER_STATS {json}` line to stdout with `items_scraped / response_count / error_count / finish_reason`, then exits. Fixed: default-argument capture of crawler.stats moved to closure body to avoid RuntimeError "Crawler.stats is not set yet".
+3. [scraper/scraper/pipelines/incident_pipeline.py](file:///d:/cyber-incident-tool/scraper/scraper/pipelines/incident_pipeline.py#L22-L29) — Fixed Scrapy method signatures to modern Scrapy 2.x contract: added `spider` parameter to `open_spider(self, spider)`, `close_spider(self, spider)`, `process_item(self, item, spider)`.
+4. [backend/app/agents/insight_agent.py](file:///d:/cyber-incident-tool/backend/app/agents/insight_agent.py#L15-L169) — (a) Imported `IntegrityError` from `sqlalchemy.exc`; (b) Added explicit `except IntegrityError` branch in `process()` BEFORE generic Exception catch: UNIQUE source_url/duplicate patterns → `self.logger.info("Duplicate skipped: ...")` return None; any other IntegrityError → `logger.error(...)` return None; (c) retained existing `_save_to_database()` try/except with `await session.rollback()` for all exceptions (already correct).
+5. [docker-compose.yml](file:///d:/cyber-incident-tool/docker-compose.yml#L66-L78) — Added `scraper` compose service (build context `./scraper`, command `python scraper/scheduler.py`, env: REDIS_URL / SCRAPER_INTERVAL_MINUTES / SCRAPER_SPIDERS / SCRAPER_LOG_LEVEL, depends_on redis, restart unless-stopped). Corrected the env default for `SCRAPER_INTERVAL_MINUTES` from `-360` placeholder to `30` matching PROJECT_RULES.md §5.1.
+6. [scraper/scraper/scheduler.py](file:///d:/cyber-incident-tool/scraper/scraper/scheduler.py#L11) — `DEFAULT_INTERVAL_MINUTES` corrected from 360 (6h) to 30 (30m) matching PROJECT_RULES.md §5.1.
+
+Coverage still below 70% PROJECT_RULES.md §8 requirement (scheduler.py + run_one_spider.py are new files at 0% coverage; the backlog regression tests listed above are the first step to bridging the gap alongside the 14 modules at 0% previously flagged in Stage C).
+
+---
+
 ## Stage E — End-to-end Pipeline Trace (Option A)
 **Date**: 2026-09-29
 **What was verified and how**:

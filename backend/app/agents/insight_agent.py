@@ -12,6 +12,7 @@ from app.models.entity import Entity, IncidentEntity, Sector
 from app.models.source import Source
 from app.schemas.incident import IncidentCreate
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 class InsightAgent(BaseAgent):
     def __init__(self):
@@ -68,58 +69,65 @@ class InsightAgent(BaseAgent):
 
     async def _save_to_database(self, data: dict) -> None:
         async with async_session() as session:
-            sector_id = None
-            if data.get("sector_code"):
-                result = await session.execute(select(Sector.id).where(Sector.code == data["sector_code"]))
-                sector_id = result.scalar_one_or_none()
+            try:
+                await self._persist(session, data)
+            except Exception:
+                await session.rollback()
+                raise
 
-            source_id = None
-            if data.get("source_name"):
-                result = await session.execute(select(Source.id).where(Source.name == data["source_name"]))
-                source_id = result.scalar_one_or_none()
+    async def _persist(self, session, data: dict) -> None:
+        sector_id = None
+        if data.get("sector_code"):
+            result = await session.execute(select(Sector.id).where(Sector.code == data["sector_code"]))
+            sector_id = result.scalar_one_or_none()
 
-            published_at = self._parse_published_at(data.get("published_at"))
+        source_id = None
+        if data.get("source_name"):
+            result = await session.execute(select(Source.id).where(Source.name == data["source_name"]))
+            source_id = result.scalar_one_or_none()
 
-            incident_data = IncidentCreate(
-                title=data.get("title", "Unknown"),
-                description=data.get("description"),
-                attack_type=data.get("attack_type", "unknown"),
-                severity=data.get("severity", "info"),
-                source_url=data.get("source_url"),
-                published_at=published_at,
-                raw_content=data.get("content"),
-                source_id=source_id,
-                sector_id=sector_id,
-                confidence_score=data.get("confidence_score", 0.0),
-                india_relevance_score=data.get("india_relevance_score", 0.0),
-                metadata=data.get("extra", {}),
+        published_at = self._parse_published_at(data.get("published_at"))
+
+        incident_data = IncidentCreate(
+            title=data.get("title", "Unknown"),
+            description=data.get("description"),
+            attack_type=data.get("attack_type", "unknown"),
+            severity=data.get("severity", "info"),
+            source_url=data.get("source_url"),
+            published_at=published_at,
+            raw_content=data.get("content"),
+            source_id=source_id,
+            sector_id=sector_id,
+            confidence_score=data.get("confidence_score", 0.0),
+            india_relevance_score=data.get("india_relevance_score", 0.0),
+            metadata=data.get("extra", {}),
+        )
+
+        payload = incident_data.model_dump()
+        payload["metadata_"] = payload.pop("metadata", {})
+        incident = Incident(**payload)
+        session.add(incident)
+        await session.commit()
+        await session.refresh(incident)
+        
+        for ent_data in data.get("extracted_entities", []):
+            ent_name = ent_data["name"]
+            ent_type = ent_data["entity_type"]
+            result = await session.execute(
+                select(Entity).where(Entity.name == ent_name).where(Entity.entity_type == ent_type)
             )
-
-            payload = incident_data.model_dump()
-            payload["metadata_"] = payload.pop("metadata", {})
-            incident = Incident(**payload)
-            session.add(incident)
-            await session.commit()
-            await session.refresh(incident)
+            entity = result.scalar_one_or_none()
+            if not entity:
+                entity = Entity(name=ent_name, entity_type=ent_type)
+                session.add(entity)
+                await session.commit()
+                await session.refresh(entity)
             
-            for ent_data in data.get("extracted_entities", []):
-                ent_name = ent_data["name"]
-                ent_type = ent_data["entity_type"]
-                result = await session.execute(
-                    select(Entity).where(Entity.name == ent_name).where(Entity.entity_type == ent_type)
-                )
-                entity = result.scalar_one_or_none()
-                if not entity:
-                    entity = Entity(name=ent_name, entity_type=ent_type)
-                    session.add(entity)
-                    await session.commit()
-                    await session.refresh(entity)
-                
-                ie = IncidentEntity(incident_id=incident.id, entity_id=entity.id, role="mentioned")
-                session.add(ie)
-            
-            await session.commit()
-            data["incident_id"] = str(incident.id)
+            ie = IncidentEntity(incident_id=incident.id, entity_id=entity.id, role="mentioned")
+            session.add(ie)
+        
+        await session.commit()
+        data["incident_id"] = str(incident.id)
 
     async def process(self, data: dict) -> dict | None:
         text = data.get("content", "")
@@ -149,6 +157,13 @@ class InsightAgent(BaseAgent):
 
         try:
             await self._save_to_database(data)
+        except IntegrityError as e:
+            msg = str(e).lower()
+            if "unique" in msg and ("source_url" in msg or "duplicate" in msg):
+                self.logger.info(f"Duplicate skipped: {data.get('source_url')}")
+            else:
+                self.logger.error(f"Integrity error saving incident: {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Failed to save incident: {e}")
             return None

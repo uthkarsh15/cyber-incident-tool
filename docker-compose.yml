@@ -63,5 +63,19 @@ services:
     depends_on:
       - backend
 
+  scraper:
+    build:
+      context: ./scraper
+    command: python scraper/scheduler.py
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - SCRAPER_INTERVAL_MINUTES=${SCRAPER_INTERVAL_MINUTES:-30}
+      - SCRAPER_SPIDERS=${SCRAPER_SPIDERS:-news}
+      - SCRAPER_LOG_LEVEL=${SCRAPER_LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:

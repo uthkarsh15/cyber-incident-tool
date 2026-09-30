@@ -19,14 +19,14 @@ class RedisQueuePipeline:
         client = redis.Redis(host=host, port=port, db=db)
         return cls(redis_client=client)
 
-    def open_spider(self):
+    def open_spider(self, spider):
         pass
 
-    def close_spider(self):
+    def close_spider(self, spider):
         if self.redis_client:
             self.redis_client.close()
 
-    def process_item(self, item):
+    def process_item(self, item, spider):
         article = {
             "source_name": item.get("source_name"),
             "source_url": item.get("source_url"),
