@@ -28,6 +28,16 @@ Expected: **16 passed. scheduler.py: 95% (132 stmts / 7 miss; lines 162-163, 191
 
 ---
 
+## Stage G1.4a — Relevance verdict logging, SQL echo off
+**Date**: 2026-10-18
+- Added INFO verdict logging to `RelevanceAgent` under `agent.relevance`: `verdict=ACCEPT|REJECT score=<val> reason=<reason> title="<first 80 chars>" url=<source_url>`.
+- Turned off SQLAlchemy echo by default in `backend/app/database.py` (optional env var `SQL_ECHO=true` enables it).
+- Tests added in `backend/tests/test_agents.py` (ACCEPT logging, REJECT logging, SQL_ECHO default/enabled): **42 collected, 41 passed, 1 xfailed, 81% (661 stmts / 123 miss)**.
+- Rebuilt services baking `./backend`: `docker compose up -d --build backend agent_orchestrator`.
+- Live run verification: scraper restart crawled 16 items; `agent_orchestrator` logged **1 ACCEPT and 15 REJECT** lines under `agent.relevance`; `sqlalchemy.engine` query log count: **0**; Redis queue: 0; DB unchanged (3 incidents, 64 entities, 64 incident_entities, 0 correlations).
+
+---
+
 ## Stage G1.2 — Backend count fix-up, pytest-cov addition, live scraper run
 **Date**: 2026-10-18
 - Backend test count verified: **39 collected, 38 passed, 1 xfailed, 81% (654 stmts / 123 miss)**.

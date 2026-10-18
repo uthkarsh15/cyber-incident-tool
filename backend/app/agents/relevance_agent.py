@@ -40,9 +40,23 @@ class RelevanceAgent(BaseAgent):
         if data.get("source_name") in ["CERT-In", "NCIIPC"]:
             score = max(score, 0.9)
 
+        title: str = str(data.get("title", ""))[:80].replace('"', "'")
+        url: str = str(data.get("source_url") or data.get("url") or "")
+
         if score < RELEVANCE_THRESHOLD:
-            self.logger.debug(f"Discarded (score={score:.2f}): {data.get('title', '')[:80]}")
+            self.logger.info(
+                f'verdict=REJECT score={score:.2f} reason=below_threshold title="{title}" url={url}'
+            )
             return None
+
+        reason: str = (
+            "source_override"
+            if data.get("source_name") in ["CERT-In", "NCIIPC"] and not keywords_found
+            else "keywords_matched"
+        )
+        self.logger.info(
+            f'verdict=ACCEPT score={score:.2f} reason={reason} title="{title}" url={url}'
+        )
 
         data["is_india_relevant"] = True
         data["india_relevance_score"] = score
