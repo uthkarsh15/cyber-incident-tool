@@ -1,5 +1,41 @@
 # STATUS.md — Stage-by-Stage Verification Log
 
+## How to run tests
+
+Back-end unit + regression tests (5 modules: app/agents, routes, services, schemas, utils):
+```
+docker compose build backend && docker compose up -d backend
+docker compose exec backend pytest --cov=app --cov-report=term-missing
+```
+Expected: **39 collected, 38 passed, 1 xfailed, 81% (654 stmts / 123 miss).**
+`pytest-cov` added to `backend/requirements.txt` in commit ab01f9f (G1.2); earlier images lacked it and `--cov=app` would fail with "unrecognized arguments".
+
+Scraper scheduler tests (16 tests, exercise REAL `scraper/scraper/scheduler.py` via sys.path import inside `scraper/tests/test_scheduler.py`):
+```
+# Linux / macOS / Git-Bash:
+docker run --rm \
+    -v "$(pwd)/scraper:/scraper-src" \
+    -w /scraper-src \
+    cyber-incident-tool-scraper \
+    bash -c "pip install pytest pytest-cov -q && \
+             pytest tests/test_scheduler.py --cov=scheduler --cov-report=term-missing"
+
+# Windows PowerShell (replace $(pwd) with absolute path):
+docker run --rm -v "d:\cyber-incident-tool\scraper:/scraper-src" -w /scraper-src cyber-incident-tool-scraper bash -c "pip install pytest pytest-cov -q && pytest tests/test_scheduler.py --cov=scheduler --cov-report=term-missing"
+```
+`--cov=scheduler` is the verified working form (shows only `scraper/scheduler.py` at 95%). `--cov=scraper/scheduler` and `--cov=scraper.scheduler` both fail with "module-not-imported".
+Expected: **16 passed. scheduler.py: 95% (132 stmts / 7 miss; lines 162-163, 191-193, 202, 235).** (run_one_spider.py is 0% under `--cov=.` (verified), because it is only invoked via `subprocess.run` and coverage.py does not trace subprocess children by default).
+
+---
+
+## Stage G1.2 — Backend count fix-up, pytest-cov addition, live scraper run
+**Date**: 2026-10-18
+- Backend test count verified: **39 collected, 38 passed, 1 xfailed, 81% (654 stmts / 123 miss)**.
+- `pytest-cov` added to `backend/requirements.txt` in commit ab01f9f (G1.2).
+- Oct 18 scraper run: 15 items scraped, errors=1 (cause not visible in logs; see backlog), 1 new incident created (CERT-In Warns AI Agents..., attack_type=data_breach). DB counts after: incidents=3, entities=64, incident_entities=64, correlations=0.
+
+---
+
 ## Stage G1.1 — Scheduler tests target REAL scraper/scraper/scheduler.py (no copy in tests)
 **Date**: 2026-09-30
 
@@ -44,7 +80,13 @@ b25ae40 stage C: pytest runs clean inside backend container 5/5 PASSED [...]
 
 **G1.1 Step 6 — Coverage real scheduler.py = 95% (132 stmts / 7 miss) run_one_spider = 0% coverage/was not imported at all. run_one_spider module is only ever launched via subprocess (via. coverage does not trace subprocess children. No test code inside a subprocess, coverage.py does not trace children by default without coverage run_one_spider.
 
-**G1.1 Step 7 — backend suite unchanged: collect 55 tests; run 54 passed, 1 xfailed in 1.39s, 81% (654 stmts/123 miss). Dashboard 0 diffs coverage vs G1.
+**G1.1 Step 7 — backend suite unchanged: collect 55 tests; run 54 passed, 1 xfailed in 1.39s, 81% (654 stmts/123 miss). Dashboard 0 diffs coverage vs G1.**
+
+**Correction (G1.2):**
+- 55/54 was correct at commit 2435e56.
+- "Backend suite unchanged" in G1.1 Step 7 was wrong, since the 16 scheduler tests had been moved out.
+- At the start of G1.2 the container already collected 39 (11 tests in `test_scheduler_and_services.py`) before any rebuild, so the image was not stale then.
+- The cause of the G1.1 "55" run is unknown; the older text says tests were "volume-mounted" while compose has no backend volume, and that run is not reproducible from a clean build. Clean count is **39 collected, 38 passed, 1 xfailed, 81% (654 stmts / 123 miss)** plus **16 passed** in the scraper test suite. Additionally, `pytest-cov` was missing from `backend/requirements.txt` until commit ab01f9f.
 
 ---
 
