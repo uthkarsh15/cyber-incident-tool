@@ -28,6 +28,20 @@ Expected: **16 passed. scheduler.py: 95% (132 stmts / 7 miss; lines 162-163, 191
 
 ---
 
+## Stage G1.5 — Whole-word keyword matching in relevance agent
+**Date**: 2026-10-18
+- Implemented word-boundary matching in `backend/app/agents/relevance_agent.py` using `_build_keyword_regex`: prepends `(?<![a-z0-9])` and appends `(?![a-z0-9])` for alphanumeric boundary keyword matching, compiled per keyword in `KEYWORD_PATTERNS`.
+- Eliminates substring false-positives where generic words like 'arbitrary' or 'occupied' triggered matches for keywords like 'rbi' or 'upi'.
+- Log messages now include `keywords=<keywords_found>` for both ACCEPT and REJECT verdicts.
+- Tests added in `backend/tests/test_agents.py` (`test_relevance_agent_whole_word_matching` covering substring exclusion, possessives like "India's", CERT-In, and ".in " domain boundary): **43 collected, 42 passed, 1 xfailed, 82% (667 stmts / 123 miss)**.
+- Stored incidents replay (stdin into backend):
+  - "Weekly Recap" scored 0.00 (`verdict=REJECT keywords=[]`).
+  - "ThreatsDay" scored 0.30 (`verdict=REJECT keywords=['indian']`).
+  - "CERT-In" scored 0.90 (`verdict=ACCEPT keywords=['india', 'indian', 'cert-in']`).
+- Live verification: scraper restart crawled 16 items; `agent_orchestrator` processed all 16 items logging **1 ACCEPT** (CERT-In) and **15 REJECT**; Redis queue drained to 0; DB unchanged (3 incidents, 64 entities, 64 incident_entities, 0 correlations).
+
+---
+
 ## Stage G1.4a — Relevance verdict logging, SQL echo off
 **Date**: 2026-10-18
 - Added INFO verdict logging to `RelevanceAgent` under `agent.relevance`: `verdict=ACCEPT|REJECT score=<val> reason=<reason> title="<first 80 chars>" url=<source_url>`.

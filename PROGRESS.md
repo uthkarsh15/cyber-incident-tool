@@ -24,6 +24,7 @@
 | Stage G1.1 (closure) | ✅ CLOSED (commit eb65b29 (2026-09-30); closed 2026-10-18) | Commit eb65b29 | Moved 16 scheduler tests to scraper/tests/test_scheduler.py; removed copy from backend/tests; verified 95% scheduler coverage. |
 | Stage G1.2 (closure) | ✅ CLOSED (2026-10-18) | Commit ab01f9f; `docker compose up -d --build backend` | Added `pytest-cov==6.*` to `backend/requirements.txt` (ab01f9f). Rebuilt backend image. True backend suite: **39 collected, 38 passed, 1 xfailed, 81% (654/123)**. Scraper suite (separate image, ad-hoc): **16 passed**, `scheduler.py` 95%. Verified `--cov=scheduler`. |
 | Stage G1.4a (closure) | ✅ CLOSED (2026-10-18) | `docker compose up -d --build backend agent_orchestrator`; backend suite 41 passed, 1 xfailed (81%); live scraper run 1 ACCEPT / 15 REJECT | RelevanceAgent INFO verdict logging added (`agent.relevance`); SQLAlchemy echo off by default (`SQL_ECHO` env var). 3 tests added (42 collected, 41 passed, 1 xfailed). Live run proved 1 ACCEPT / 15 REJECT and 0 `sqlalchemy.engine` query lines. |
+| Stage G1.5 (closure) | ✅ CLOSED (2026-10-18) | `docker compose up -d --build backend agent_orchestrator`; backend suite 43 collected, 42 passed, 1 xfailed (82%); live scraper run 1 ACCEPT / 15 REJECT | Whole-word regex matching in RelevanceAgent (`_build_keyword_regex`). Eliminates substring false-positives (e.g. 'arbitrary' matching 'rbi', 'occupied' matching 'upi'). Replay of 3 stored incidents: Weekly Recap & ThreatsDay REJECT (0.00 and 0.30), CERT-In ACCEPT (0.90). Live scraper run: 15 REJECT, 1 ACCEPT (CERT-In). DB counts unchanged (3 incidents, 64 entities, 64 incident_entities, 0 correlations). |
 
 ---
 
@@ -309,6 +310,9 @@ After completing a task:
 | **pytest-cov belongs in requirements-dev.txt** | Low | Open (backlog) | pytest-cov added to backend/requirements.txt for test running inside container, but belongs in a separate requirements-dev.txt for production image cleanliness. |
 | **Correlation window is 7 days, never exercised on real multi-item data** | Medium | Open (backlog) | 7-day window; no real multi-item run yet (Oct 18: query returned only the new incident). |
 | **Scraper errors=N not diagnosable from logs** | Medium | Open (backlog) | Scrapy ERROR lines are suppressed in child subprocess (`install_root_handler=False` and no logging handlers configured in run_one_spider.py); scraper logs report error_count from stats but suppress underlying error tracebacks. Cause inferred from run_one_spider.py (install_root_handler=False); not yet reproduced live. |
+| **Single high keyword scores 0.3 < threshold 0.4** | Medium | Open (backlog) | One whole-word high keyword scores 0.3 < threshold 0.4, so a single India mention alone is rejected (product decision pending). |
+| **Roundup posts with >=2 real keyword hits can still pass** | Low | Open (backlog) | Roundup posts containing >=2 real Indian keyword hits can still reach score >= 0.40 and pass relevance filtering despite being aggregate posts. |
+| **Pre-G1.5 false positive incidents remain in DB** | Low | Open (backlog) | Incidents e163c9f8-af20-417c-aefe-a1bbdeb1081e ('Weekly Recap') and 0f3194de-6214-4a0f-9647-6efc70282add ('ThreatsDay') remain in the DB as pre-G1.5 false positives. |
 
 ---
 
